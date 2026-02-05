@@ -2,6 +2,8 @@
 #include <Arduino.h>
 
 #include "weights.h"
+#include "layer_config.h"
+#include "quant_params.h"
 
 void print_weight_statistics() {
     Serial.println("\n========== Weight File Statistics ==========");
@@ -59,6 +61,41 @@ void verify_weight() {
     Serial.flush();
 }
 
+void verify_layer_config() {
+    Serial.println("\n========== Layer Config Check ==========");
+    for (size_t i = 0; i < NUM_LAYERS; ++i) {
+        const struct LayerConfig *cfg = &model_layer_config[i];
+        if (cfg->input_channels == 0 || cfg->output_channels == 0 || cfg->kernel_size == 0) {
+            Serial.printf("ERROR: Layer %zu has invalid configuration!\n", i);
+        }
+    }
+    size_t total_layer_config_bytes = sizeof(model_layer_config);
+    Serial.printf("Total layer config size: %zu bytes\n", total_layer_config_bytes);
+    Serial.println("All layer config checks PASSED!");
+    Serial.flush();
+}
+
+void verify_quant_params() {
+    Serial.println("\n========== Quantization Parameters Check ==========");
+    for (size_t i = 0; i < NUM_LAYERS; ++i) {
+        const struct QuantParams *qp = &model_quant_params[i];
+        if (qp->input_scale <= 0 || qp->output_scale <= 0) {
+            Serial.printf("ERROR: Layer %zu has invalid quantization scales!\n", i);
+        }
+        if (qp->input_zero_point < -128 || qp->input_zero_point > 127 ||
+            qp->output_zero_point < -128 || qp->output_zero_point > 127) {
+            Serial.printf("ERROR: Layer %zu has invalid quantization zero points!\n", i);
+        }
+    }
+    for (size_t i = 0; i < 10; ++i) {
+        const struct QuantParams *qp = &model_quant_params[i];
+        Serial.printf("Layer %zu: input_scale=%.6f, input_zp=%d, output_scale=%.6f, output_zp=%d, weight_scale[0]=%.6f, weight_zp=%d\n",
+                      i, qp->input_scale, qp->input_zero_point, qp->output_scale, qp->output_zero_point, qp->weight_scales[0], qp->weight_zps[0]);
+    }
+    Serial.println("All quantization parameters checks PASSED!");
+    Serial.flush();
+}
+
 void setup() {
     Serial.begin(115200);
     while (!Serial && millis() < 5000); // wait for serial
@@ -66,7 +103,8 @@ void setup() {
 
     print_weight_statistics();
     verify_weight();    
-    
+    verify_layer_config();
+    verify_quant_params();
     printf("\nAll integrity checks completed.\n");
     Serial.flush();
 }

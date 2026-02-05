@@ -4,10 +4,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "weights.h"
+#include "weights_test.h"
+#include "layer_config.h"
 
 #ifdef NATIVE_TEST
-    #define PROGMEM
     #define pgm_read_byte(addr) (*(const uint8_t *)(addr))
 #endif
 
@@ -47,6 +47,24 @@ void test_bias_readable() {
     }
 }
 
+void test_layer_config() {
+    size_t num_layers = sizeof(model_layer_config) / sizeof(struct LayerConfig);
+    TEST_ASSERT_MESSAGE(num_layers == NUM_LAYERS, "Layer config count does not match NUM_LAYERS");
+    for (size_t i = 0; i < num_layers; ++i) {
+        const struct LayerConfig *cfg = &model_layer_config[i];
+        TEST_ASSERT_NOT_NULL_MESSAGE(cfg->name, "Layer name is null");
+        TEST_ASSERT_GREATER_THAN(0, cfg->input_channels);
+        TEST_ASSERT_GREATER_THAN(0, cfg->output_channels);
+        TEST_ASSERT_GREATER_THAN(0, cfg->kernel_size);
+    }
+    for (size_t i = 0; i < 10; ++i) {
+        const struct LayerConfig *cfg = &model_layer_config[i];
+        printf("Layer %zu: %s, InCh: %u, OutCh: %u, K: %u, S: %u, P: %u\n",
+               i, cfg->name, cfg->input_channels, cfg->output_channels,
+               cfg->kernel_size, cfg->stride, cfg->padding);
+    }
+}
+
 void print_memory_stats() {
     size_t num_layers = sizeof(model_weights) / sizeof(struct LayerWeights);
     printf("\n========== Memory Statistics ==========\n");
@@ -61,6 +79,7 @@ int main() {
     RUN_TEST(test_weights_not_null);
     RUN_TEST(test_weights_readable);
     RUN_TEST(test_bias_readable);
+    RUN_TEST(test_layer_config);
     print_memory_stats();
     return UNITY_END();
 }
