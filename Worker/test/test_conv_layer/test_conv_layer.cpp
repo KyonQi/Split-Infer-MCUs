@@ -29,8 +29,8 @@ void test_single_conv_layer() {
     conv2d::im2col_conv2d(&test_input[0][0][0], weights, bias, &output_im2col[0][0][0], cfg, qp, 4, 4);
     uint32_t elapsed_im2col = micros() - start_im2col;
 
-    Serial.printf("Inference time: %u us\n", elapsed);
-    Serial.printf("Inference time (im2col): %u us\n", elapsed_im2col);
+    Serial.printf("CONV: Inference time: %u us\n", elapsed);
+    Serial.printf("CONV: Inference time (im2col): %u us\n", elapsed_im2col);
     Serial.println("Output:");
     for (size_t c = 0; c < cfg->output_channels; ++c) {
         for (size_t h = 0; h < 2; ++h) {
@@ -65,7 +65,7 @@ void test_depthwise_conv_layer() {
     uint32_t start = micros();
     conv2d::depthwise_conv2d(&test_input_dw[0][0][0], weights, bias, &output[0][0][0], cfg, qp, 4, 4);
     uint32_t elapsed = micros() - start;
-    printf("Inference time: %lu us\n", elapsed);
+    printf("CONV: Inference time: %lu us\n", elapsed);
 
     Serial.println("============================================");
     // print channel 0 and 31
