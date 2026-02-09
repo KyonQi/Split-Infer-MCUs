@@ -62,13 +62,25 @@ void test_depthwise_conv_layer() {
 
     // output buffer
     uint8_t output[32][4][4];
-    uint8_t output_dsp[32][4][4];
     uint32_t start = micros();
     conv2d::depthwise_conv2d(&test_input_dw[0][0][0], weights, bias, &output[0][0][0], cfg, qp, 4, 4);
     uint32_t elapsed = micros() - start;
     printf("Inference time: %lu us\n", elapsed);
 
-     Serial.println("============================================");
+    Serial.println("============================================");
+    // print channel 0 and 31
+    for (size_t h = 0; h < 4; ++h) {
+        for (size_t w = 0; w < 4; ++w) {
+            Serial.printf("%d ", output[0][h][w]);
+        }
+    }
+    Serial.println();
+    Serial.println();
+    for (size_t h = 0; h < 4; ++h) {
+        for (size_t w = 0; w < 4; ++w) {
+            Serial.printf("%d ", output[31][h][w]);
+        }
+    }
 }
 
 void setup() {
