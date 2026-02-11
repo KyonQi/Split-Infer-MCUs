@@ -55,7 +55,7 @@ class Coordinator:
                 return
             reg_msg = RegisterMessage.unpack(payload)
             worker.clock_mhz = reg_msg.clock_mhz
-            logger.info(f"[Coordinator]: Worker registered with clock {worker.clock_mhz} MHz")
+            logger.info(f"[Coordinator]: Worker {worker.worker_id} registered with clock {worker.clock_mhz} MHz")
 
             # send ACK
             ack_msg = RegisterAckMessage(status=0, assigned_id=worker.worker_id)
@@ -94,7 +94,8 @@ class Coordinator:
 
     async def handle_error(self, worker: WorkerInfo, payload: bytes):
         # parse the error message and log it
-        logger.error(f"[Coordinator]: Received error from worker {worker.worker_id}")
+        error_msg = ErrorMessage.unpack(payload)
+        logger.error(f"[Coordinator]: Received error from worker {worker.worker_id}: {error_msg.error_code} - {error_msg.description}")
         pass
 
 

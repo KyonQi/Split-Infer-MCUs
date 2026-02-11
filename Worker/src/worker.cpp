@@ -94,17 +94,21 @@ void Worker::HandleRegistering() {
         if (client_.available() >= sizeof(MessageHeader)) {
             client_.read((uint8_t *)&header, sizeof(header));
             if (header.magic != PROTOCOL_MAGIC || header.type != MessageType::REGISTER_ACK) {
+                Serial.printf("Worker %d receive: 0x%08x, type: %d\n", worker_id_, header.magic, header.type);
                 Serial.println("Invalid registration ack received, ignoring...");
                 continue;
             }
             RegisterAckMessage ack_msg;
-            if (header.payload_len != sizeof(RegisterAckMessage) - sizeof(MessageHeader)) {
+            if (header.payload_len != sizeof(RegisterAckMessage)) {
                 Serial.println("Invalid registration ack payload length, ignoring...");
                 continue;
             }
-            client_.read((uint8_t *)&ack_msg + sizeof(MessageHeader), sizeof(RegisterAckMessage) - sizeof(MessageHeader));
+            client_.read((uint8_t *)&ack_msg, sizeof(RegisterAckMessage));
             if (ack_msg.status != 0) {
                 Serial.printf("Registration failed with error code %d\n", ack_msg.status);
+                
+                client_.stop(); // TODO how to gracefully abstract the codes here?
+                is_connected_ = false;
                 state_ = WorkerState::DISCONNECTED;
                 return;
             }
