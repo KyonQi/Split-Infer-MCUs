@@ -1,22 +1,27 @@
-// #include <Arduino.h>
-// #include "conv/conv2d.h"
+#include <Arduino.h>
+#include "worker.h"
 
+#define WORKER_ID 0
+#define SVR_IP IPAddress(192, 168, 1, 10)
+#define SVR_PORT 54321
 
-// void setup() {
-//   Serial.begin(115200);
-//   while (!Serial);
-//   delay(1000);
-//   conv2d::native_conv2d(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 4, 4); // just to test the function call
-//   Serial.println("Conv Layer Test");
-//   Serial.flush();
-// }
+Worker worker(WORKER_ID, SVR_IP, SVR_PORT);
 
-// void loop() {
-//   delay(1000);
-//   static uint32_t last_heartbeat = 0;
-//   if (millis() - last_heartbeat > 5000) {
-//       Serial.print(".");
-//       Serial.flush();
-//       last_heartbeat = millis();
-//   }
-// }
+void setup() {
+    Serial.begin(115200);
+    while (!Serial);
+    delay(1000);
+    worker.Begin();
+    Serial.println("Worker setup completed");
+}
+
+void loop() {
+    worker.Loop();
+    delay(10); // avoid busy loop, adjust as needed
+    static uint32_t last_heartbeat = 0;
+    if (millis() - last_heartbeat > 5000) {
+        Serial.print(".");
+        Serial.flush();
+        last_heartbeat = millis();
+    }
+}

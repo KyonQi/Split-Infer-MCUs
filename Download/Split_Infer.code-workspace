@@ -10,6 +10,9 @@
 		{
 			"name": "Worker",
 			"path": "../Worker"
+		},
+		{
+			"path": "../Coordinator"
 		}
 	],
 	"settings": {
