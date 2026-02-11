@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <NativeEthernet.h>
 
+#include "protocol.h"
+
 class Worker final {
 public:
     Worker(uint8_t worker_id, IPAddress svr_ip, uint16_t svr_port);
@@ -53,8 +55,8 @@ private:
     
     bool is_connected_;
 
-    DMAMEM uint8_t input_buffer_[64 * 1024];
-    DMAMEM uint8_t output_buffer_[64 * 1024];
+    static uint8_t input_buffer_[64 * 1024];
+    static uint8_t output_buffer_[64 * 1024];
 };
 
 #endif // WORKER_H

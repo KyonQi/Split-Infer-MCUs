@@ -2,6 +2,12 @@ import asyncio
 import logging
 from src.coordniator import Coordinator
 
+logging.basicConfig(filename='./coordinator.log', 
+                    filemode='w',
+                    level=logging.DEBUG, 
+                    format='[%(asctime)s] %(name)s - %(levelname)s: %(message)s')
+# Set root logger level explicitly to ensure all child loggers inherit it
+logging.getLogger().setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 async def main():

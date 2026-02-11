@@ -6,6 +6,8 @@
 #include "conv/conv2d.h"
 #include "linear/linear.h"
 
+DMAMEM uint8_t Worker::input_buffer_[64 * 1024];
+DMAMEM uint8_t Worker::output_buffer_[64 * 1024];
 
 Worker::Worker(uint8_t worker_id, IPAddress svr_ip, uint16_t svr_port)
     : worker_id_(worker_id), svr_ip_(svr_ip), svr_port_(svr_port), is_connected_(false) {
@@ -17,14 +19,18 @@ Worker::~Worker() {}
 void Worker::Begin() {
     // allocate static IP
     uint8_t mac[6] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, worker_id_ };
-    IPAddress local_ip(192, 168, 1, 100 + worker_id_);
+    IPAddress local_ip(192, 168, 1, 110 + worker_id_);  // cutomize it to avoid IP conflicts
     IPAddress dns(192, 168, 1, 1);
     IPAddress gateway(192, 168, 1, 1);
     IPAddress subnet(255, 255, 255, 0);
 
-    Ethernet.begin(mac, local_ip, dns, gateway, subnet); // TODO check here
-
-    Serial.printf("Worker %d started with IP: %s\n", worker_id_, String(local_ip));
+    Ethernet.begin(mac, local_ip, dns, gateway, subnet);
+    
+    // wait some time to init
+    delay(1000);
+    
+    Serial.printf("Worker %d started with IP: %d.%d.%d.%d\n", 
+        worker_id_, local_ip[0], local_ip[1], local_ip[2], local_ip[3]);
 
     // ConnectToServer();
 }
@@ -64,16 +70,18 @@ void Worker::HandleDisconnected() {
 }
 
 void Worker::HandleConnecting() {
-    Serial.printf("Worker %d connecting to server %s:%d...\n", worker_id_, String(svr_ip_), svr_port_);
+    Serial.printf("Worker %d connecting to server %d.%d.%d.%d:%d...\n", 
+        worker_id_, svr_ip_[0], svr_ip_[1], svr_ip_[2], svr_ip_[3], svr_port_);
 
     if (client_.connect(svr_ip_, svr_port_)) {
-        Serial.printf("Worker %d connected to server %s:%d\n", worker_id_, String(svr_ip_), svr_port_);
+        Serial.printf("Worker %d connected to server %d.%d.%d.%d:%d\n", 
+            worker_id_, svr_ip_[0], svr_ip_[1], svr_ip_[2], svr_ip_[3], svr_port_);
         is_connected_ = true;
         state_ = WorkerState::REGISTERING;
         return; 
     }
-    Serial.printf("Worker %d failed to connect, retrying in 2s...\n", worker_id_);
-    delay(2000);
+    Serial.printf("Worker %d failed to connect, retrying in 5s...\n", worker_id_);
+    delay(5000);
 }
 
 void Worker::HandleRegistering() {
@@ -109,6 +117,18 @@ void Worker::HandleRegistering() {
     client_.stop(); // TODO how to gracefully abstract the codes here?
     is_connected_ = false;
     state_ = WorkerState::DISCONNECTED;
+}
+
+void Worker::SendRegistration() {
+    MessageHeader header;
+    RegisterMessage reg_msg;
+    memset(&reg_msg, 0, sizeof(reg_msg));
+    // maybe needs refactor to avoid the memcpy
+    init_header(header, MessageType::REGISTER, worker_id_, sizeof(RegisterMessage));
+    reg_msg.clock_mhz = F_CPU / 1000000;
+    Send((const uint8_t *)&header, sizeof(header));
+    Send((const uint8_t *)&reg_msg, sizeof(reg_msg)); // TODO error handling needs!
+    Serial.printf("Worker %d sent registration message\n", worker_id_);
 }
 
 void Worker::HandleIdle() {
@@ -186,23 +206,17 @@ void Worker::HandleSendingResult() {
     state_ = WorkerState::IDLE;
 }
 
-void Worker::SendRegistration() {
-    RegisterMessage reg_msg;
-    memset(&reg_msg, 0, sizeof(reg_msg));
-    // maybe needs refactor to avoid the memcpy
-    init_header(reg_msg.header, MessageType::REGISTER, worker_id_, sizeof(RegisterMessage) - sizeof(MessageHeader));
-    reg_msg.clock_mhz = F_CPU / 1000000;
-    Send((const uint8_t *)&reg_msg, sizeof(reg_msg)); // TODO error handling needs!
-    Serial.printf("Worker %d sent registration message\n", worker_id_);
-}
+
 
 void Worker::SendError(ErrorCode code, const char *description) {
+    MessageHeader header;
     ErrorMessage err_msg;
     memset(&err_msg, 0, sizeof(err_msg));
     strncpy(err_msg.description, description, sizeof(err_msg.description) - 1);
     err_msg.description[sizeof(err_msg.description) - 1] = '\0'; // ensure null-termination
-    init_header(err_msg.header, MessageType::ERROR, worker_id_, sizeof(ErrorMessage) - sizeof(MessageHeader));
+    init_header(header, MessageType::ERROR, worker_id_, sizeof(ErrorMessage));
     err_msg.error_code = static_cast<uint8_t>(code);
+    Send((const uint8_t *)&header, sizeof(header));
     Send((const uint8_t *)&err_msg, sizeof(err_msg));
     Serial.printf("Worker %d sent error message: %s\n", worker_id_, err_msg.description);
 }
