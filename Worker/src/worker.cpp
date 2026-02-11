@@ -1,8 +1,15 @@
 #include "worker.h"
 #include "protocol.h"
+#include "weights.h"
+#include "layer_config.h"
+#include "quant_params.h"
+#include "conv/conv2d.h"
+#include "linear/linear.h"
+
 
 Worker::Worker(uint8_t worker_id, IPAddress svr_ip, uint16_t svr_port)
     : worker_id_(worker_id), svr_ip_(svr_ip), svr_port_(svr_port), is_connected_(false) {
+    state_ = WorkerState::DISCONNECTED;
 }
 
 Worker::~Worker() {}
@@ -19,23 +26,209 @@ void Worker::Begin() {
 
     Serial.printf("Worker %d started with IP: %s\n", worker_id_, String(local_ip));
 
-    ConnectToServer();
+    // ConnectToServer();
 }
 
-void Worker::ConnectToServer() {
+void Worker::Loop() {
+    switch (state_) {
+    case WorkerState::DISCONNECTED:
+        HandleDisconnected();
+        break;
+    case WorkerState::CONNECTING:
+        HandleConnecting();
+        break;
+    case WorkerState::REGISTERING:
+        HandleRegistering();
+        break;
+    case WorkerState::IDLE:
+        HandleIdle();
+        break;
+    case WorkerState::RECEIVING_TASK:
+        HandleReceivingTask();
+        break;
+    case WorkerState::COMPUTING:
+        HandleComputing();
+        break;
+    case WorkerState::SENDING_RESULT:
+        HandleSendingResult();
+        break;
+        
+    
+    default:
+        break;
+    }
+}
+
+void Worker::HandleDisconnected() {
+    state_ = WorkerState::CONNECTING;
+}
+
+void Worker::HandleConnecting() {
     Serial.printf("Worker %d connecting to server %s:%d...\n", worker_id_, String(svr_ip_), svr_port_);
 
-    while (0 == client_.connect(svr_ip_, svr_port_)) {
-        Serial.printf("Worker %d failed to connect, retrying in 2s...\n", worker_id_);
-        delay(2000);
+    if (client_.connect(svr_ip_, svr_port_)) {
+        Serial.printf("Worker %d connected to server %s:%d\n", worker_id_, String(svr_ip_), svr_port_);
+        is_connected_ = true;
+        state_ = WorkerState::REGISTERING;
+        return; 
     }
+    Serial.printf("Worker %d failed to connect, retrying in 2s...\n", worker_id_);
+    delay(2000);
+}
 
-    Serial.printf("Connected to server %s:%d\n", String(svr_ip_), svr_port_);
-    is_connected_ = true;
-
+void Worker::HandleRegistering() {
     SendRegistration();
+    
+    // wait for registration ack, timeout = 5s
+    MessageHeader header;
+    uint32_t start_time = millis();
+    while (millis() - start_time < 5000) { // wait for 5 seconds
+        if (client_.available() >= sizeof(MessageHeader)) {
+            client_.read((uint8_t *)&header, sizeof(header));
+            if (header.magic != PROTOCOL_MAGIC || header.type != MessageType::REGISTER_ACK) {
+                Serial.println("Invalid registration ack received, ignoring...");
+                continue;
+            }
+            RegisterAckMessage ack_msg;
+            if (header.payload_len != sizeof(RegisterAckMessage) - sizeof(MessageHeader)) {
+                Serial.println("Invalid registration ack payload length, ignoring...");
+                continue;
+            }
+            client_.read((uint8_t *)&ack_msg + sizeof(MessageHeader), sizeof(RegisterAckMessage) - sizeof(MessageHeader));
+            if (ack_msg.status != 0) {
+                Serial.printf("Registration failed with error code %d\n", ack_msg.status);
+                state_ = WorkerState::DISCONNECTED;
+                return;
+            }
+            Serial.printf("Worker %d registered successfully with assigned ID %d\n", worker_id_, ack_msg.assigned_id);
+            state_ = WorkerState::IDLE;
+            return;
+        }
+    }
+    Serial.printf("Worker %d registration timed out, disconnecting...\n", worker_id_);
+    client_.stop(); // TODO how to gracefully abstract the codes here?
+    is_connected_ = false;
+    state_ = WorkerState::DISCONNECTED;
+}
+
+void Worker::HandleIdle() {
+    // check if there is a new task
+    if (client_.available() >= sizeof(MessageHeader)) {
+        MessageHeader header;
+        Read((uint8_t *)&header, sizeof(header)); // TODO notice we need nonblocking way here; also error handling maybe
+        if (!validate_header(header)) {
+            Serial.println("Invalid message header received, ignoring...");
+            return;
+        }
+        if (header.type == MessageType::TASK) {
+            state_ = WorkerState::RECEIVING_TASK;
+            return;
+        }
+        // TODO maybe adds shutdown message here
+    }
+}
+
+void Worker::HandleReceivingTask() {
+    Serial.printf("Worker %d receiving task...\n", worker_id_);
+    Read((uint8_t *)&current_task_, sizeof(current_task_)); // TODO error handling
+    uint32_t total_data_size = current_task_.input_size;
+    if (total_data_size > sizeof(input_buffer_)) {
+        Serial.println("Input data size exceeds buffer size");
+        SendError(ErrorCode::ERR_OUT_OF_MEMORY, "Input data size exceeds buffer size");
+        state_ = WorkerState::IDLE;
+        return;
+    }
+    Read(input_buffer_, total_data_size);
+    state_ = WorkerState::COMPUTING;
+}
+
+// TODO need further developments
+void Worker::HandleComputing() {
+    Serial.printf("Worker %d processing task %d...\n", worker_id_, static_cast<uint8_t>(current_task_.layer_type));
+    // uint32_t start_time = micros();
+    int layer_idx = 0; // TODO need to get from task payload
+    bool success = false;
+    uint8_t *input = input_buffer_;
+    const int8_t *weights = model_weights[layer_idx].weights;
+    const int32_t *bias = model_weights[layer_idx].bias;
+    uint8_t *output = output_buffer_;
+    switch (current_task_.layer_type) {
+        case LayerType::CONV:
+            conv2d::native_conv2d(input, weights, bias, output, 
+                                    &model_layer_config[layer_idx], &model_quant_params[layer_idx],
+                                    current_task_.in_h, current_task_.in_w);
+            success = true;
+            break;
+        case LayerType::FC:
+            linear::native_linear(input, weights, bias, output,
+                                    &model_layer_config[layer_idx], &model_quant_params[layer_idx]);
+            success = true;
+            break;
+        default:
+            break;
+    }
+    if (!success) {
+        Serial.println("Invalid layer type in task");
+        SendError(ErrorCode::ERR_INVALID_TASK, "Invalid layer type in task");
+        state_ = WorkerState::IDLE;
+        return;
+    }
+    // uint32_t compute_time = micros() - start_time;
+    current_result_.compute_time_us = 0; // TODO need to get the actual compute time
+    current_result_.output_size = current_task_.out_channels * current_task_.out_h * current_task_.out_w; // TODO need to check the actual output size
+    state_ = WorkerState::SENDING_RESULT;
+}
+
+void Worker::HandleSendingResult() {
+    Serial.printf("Worker %d sending result...\n", worker_id_);
+    Send((const uint8_t *)&current_result_, sizeof(current_result_));
+    Send(output_buffer_, current_result_.output_size);
+    state_ = WorkerState::IDLE;
 }
 
 void Worker::SendRegistration() {
-
+    RegisterMessage reg_msg;
+    memset(&reg_msg, 0, sizeof(reg_msg));
+    // maybe needs refactor to avoid the memcpy
+    init_header(reg_msg.header, MessageType::REGISTER, worker_id_, sizeof(RegisterMessage) - sizeof(MessageHeader));
+    reg_msg.clock_mhz = F_CPU / 1000000;
+    Send((const uint8_t *)&reg_msg, sizeof(reg_msg)); // TODO error handling needs!
+    Serial.printf("Worker %d sent registration message\n", worker_id_);
 }
+
+void Worker::SendError(ErrorCode code, const char *description) {
+    ErrorMessage err_msg;
+    memset(&err_msg, 0, sizeof(err_msg));
+    strncpy(err_msg.description, description, sizeof(err_msg.description) - 1);
+    err_msg.description[sizeof(err_msg.description) - 1] = '\0'; // ensure null-termination
+    init_header(err_msg.header, MessageType::ERROR, worker_id_, sizeof(ErrorMessage) - sizeof(MessageHeader));
+    err_msg.error_code = static_cast<uint8_t>(code);
+    Send((const uint8_t *)&err_msg, sizeof(err_msg));
+    Serial.printf("Worker %d sent error message: %s\n", worker_id_, err_msg.description);
+}
+
+void Worker::Send(const uint8_t *buffer, size_t size) {
+    if (client_.connected()) {
+        client_.write(buffer, size);
+    }
+    client_.flush();
+}
+
+// TODO blocking read, how to unblocking?
+void Worker::Read(uint8_t *buffer, size_t size) {
+    size_t bytes_read = 0;
+    while (bytes_read < size) {
+        if (client_.available()) {
+            int ret = client_.read(buffer + bytes_read, size - bytes_read);
+            if (ret > 0) {
+                bytes_read += ret;
+            } else {
+                Serial.println("Error reading from server");
+                break;
+            }
+        }
+    }
+}
+
+
+

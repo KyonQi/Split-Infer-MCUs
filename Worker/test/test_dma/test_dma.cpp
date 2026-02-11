@@ -11,7 +11,8 @@
 #define COMPUTE_ITERATIONS 20 
 
 // ================= Memory Allocation =================
-// Souce data placed in Flash
+// Souce data placed in Flash (2x faster with DMA)
+// there's no big diff if you place it in DMARAM(i.e., RAM2)
 const uint8_t sourceData[TOTAL_DATA_SIZE] PROGMEM __attribute__((aligned(32))) = {0};
 
 // Double buffers for DMA, placed in RAM(1)
