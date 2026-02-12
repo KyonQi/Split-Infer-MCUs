@@ -1,20 +1,60 @@
 import asyncio
 import logging
 import time
-
+import json
+import numpy as np
+from dataclasses import dataclass
+from typing import Optional, Union
 from .protocol import *
 from .work_manager import *
-from .task_queue import TaskQueue
+# from .task_queue import *
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
+
+@dataclass
+class LayerConfig:
+    """layer config for inference execution"""
+    name: str
+    type: LayerType
+    layer_idx: int
+    in_channels: int
+    out_channels: int
+    kernel_size: int = 1
+    stride: int = 1
+    padding: int = 0
+    groups: int = 1
+    in_h: int = 0
+    in_w: int = 0
+    residual_add_to: Optional[str] = None
+    residual_connect_from: Optional[str] = None
+
+@dataclass
+class QuantParams:
+    """ quantization parameters needs to be shared between coordinator and workers """
+    s_in: float
+    z_in: int
+    s_w: Union[float, np.ndarray]
+    z_w: Union[float, np.ndarray]
+    s_out: float
+    z_out: int
+    m: Union[float, np.ndarray] #float # precomputing multiplier for requantization m = (s_in * s_w) / s_out    
 
 class Coordinator:
     def __init__(self, host: str = '192, 168, 1, 10', port: int = 54321):
-        self.host = host
-        self.port = port
-        self.worker_manager = WorkerManager()
-        self.task_queue = TaskQueue()
+        self.host: str = host
+        self.port: int = port
         self.running = False
+        self.worker_manager = WorkerManager()
+        
+        # inference managements
+        self.feature_map: Optional[np.ndarray] = None
+        self.residual_buffers: dict[str, np.ndarray] = {}
+        self.current_layer_idx: int = 0
+        self.layer_config_list: list[LayerConfig] = [] # get the real vale by parsing the json file later
+        self.quant_params_list: list[QuantParams] = [] # get the real value from calibration later
+
+        # stats
+        self.stats: list[dict] = []
 
     async def start(self):
         self.running = True
@@ -24,8 +64,8 @@ class Coordinator:
 
         tasks = [
             asyncio.create_task(server.serve_forever()), # start to listen
-            asyncio.create_task(self.task_dispatcher()), # start to dispatch tasks
-            # asyncio.create_task(self.worker_manager)
+            # asyncio.create_task(self.task_dispatcher()), # start to dispatch tasks
+            asyncio.create_task(self.worker_manager.heartbeat_monitor()), # start to monitor worker heartbeat
             asyncio.create_task(self.stats_printer()), # start to print stats
         ]
         try:
@@ -38,6 +78,7 @@ class Coordinator:
             logger.info("[Coordinator]: Coordinator stopped.")
 
     async def on_client_connected(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """ connected callback """
         logger.info(f"[Coordinator]: New worker connected from {writer.get_extra_info('peername')}")
         worker = self.worker_manager.add_worker(reader, writer) # worker needs contains some info
         try:
@@ -63,44 +104,231 @@ class Coordinator:
 
             # everything goes fine, worker -> idle, waiting for task assignment
             # go to event loop, waiting for messages from worker, which can be either RESULT or ERROR
-            worker.state = WorkerState.IDLE
-            await self.event_loop(worker)
+            # worker.state = WorkerState.IDLE
+            self.worker_manager.mark_worker_idle(worker)
+            # await self.worker_event_loop(worker)
             
         except Exception as e:
             logger.error(f"[Coordinator]: Error handling for worker {worker.worker_id}: {e}")
-        finally:
-            logger.info(f"[Coordinator]: Worker {worker.worker_id} disconnected")
+            worker.state = WorkerState.DISCONNECTED
             self.worker_manager.remove_worker(worker)
+        # finally:
+        #     logger.info(f"[Coordinator]: Worker {worker.worker_id} disconnected")
+        #     worker.state = WorkerState.DISCONNECTED
+        #     self.worker_manager.remove_worker(worker)
+    
+    async def execute_inference(self, input_data: np.ndarray) -> np.ndarray:
+        logger.info(f"[Coordinator]: Starting inference execution for input shape {input_data.shape}")
+
+        # TODO need further dev
+        self._parse_layer_configs() # parse the layer config and quant params from json file, and fill in the layer_config_list and quant_params_list
+        self._parse_quant_params() # parse the quant params from calibration result, and fill in the quant_params_list
         
-    async def event_loop(self, worker: WorkerInfo):
-        while self.running and worker.state != WorkerState.DISCONNECTED:
-            result: tuple[MessageHeader, bytes] = await self.worker_manager.receive_message(worker, timeout=2)
-            if not result:
-                continue
+        start_time = time.time()
+
+        self.feature_map = input_data.copy()
+        self.residual_buffers.clear()
+        
+        for layer_idx, (layer, quant_params) in enumerate(zip(self.layer_config_list, self.quant_params_list)):
+            self.current_layer_idx = layer_idx
+            logger.debug(f"[Coordinator]: Executing layer {layer_idx} - {layer.name} ({layer.type})")
             
-            header, payload = result
+            layer_start = time.perf_counter()
+            await self._run_layer(layer, quant_params)
+            layer_time = time.perf_counter() - layer_start
+            self.stats.append({
+                'layer_idx': layer_idx,
+                'layer_name': layer.name,
+                'layer_type': layer.type,
+                'compute_time': layer_time,
+            })
+
+            logger.debug(f"[Coordinator]: Layer {layer_idx} completed in {layer_time:.4f} seconds, output shape {self.feature_map.shape}")
+        
+        total_time = time.time() - start_time
+        logger.info(f"[Coordinator]: Inference execution completed in {total_time:.4f} seconds")
+
+        return self.feature_map
+
+    async def _run_layer(self, layer: LayerConfig, quant_params: QuantParams):
+        if layer.residual_add_to:
+            self.residual_buffers[layer.residual_add_to] = self.feature_map.copy()
+            logger.debug(f"[Coordinator]: Stored residual buffer for {layer.residual_add_to} with shape {self.feature_map.shape}")
+        
+        # before fc, we needs a global average pooling and flatten
+        if layer.type == LayerType.FC and self.feature_map.ndim == 3:
+            gap_output = np.mean(self.feature_map, axis=(1, 2))
+            self.feature_map = np.round(gap_output).astype(np.uint8)
+            logger.debug(f"[Coordinator]: Applied GAP for FC layer, new shape {self.feature_map.shape}")
+
+        if layer.type == LayerType.FC:
+            await self._distribute_fc(layer, quant_params)
+        else:
+            # deal with both conv2d and depthwise
+            await self._distribute_conv(layer, quant_params)
+        
+        # apply residual
+        if layer.residual_connect_from:
+            await self._apply_residual(layer.residual_connect_from)
+    
+
+    async def _distribute_conv(self, layer: LayerConfig, quant_params: QuantParams):
+        """Split the feature map by rows"""
+        C, H, W = self.feature_map.shape
+        H_out = (H + 2 * layer.padding - layer.kernel_size) // layer.stride + 1
+        W_out = (W + 2 * layer.padding - layer.kernel_size) // layer.stride + 1
+        
+        if layer.padding > 0:
+            padded = np.pad(
+                self.feature_map,
+                ((0, 0), (layer.padding, layer.padding), (layer.padding, layer.padding)),
+                mode='constant',
+                constant_values=quant_params.z_in
+            )
+        else:
+            padded = self.feature_map
+        
+            available_workers = list(self.worker_manager.workers.values())
+            num_workers = len(available_workers) # TODO maybe get idle workers
+            rows_per_worker = int(np.ceil(H_out / num_workers))
+            tasks = []
             
-            if header.type == MessageType.RESULT:
-                await self.handle_result(worker, payload)
-            elif header.type == MessageType.ERROR:
-                await self.handle_error(worker, payload)
+            for i, worker in enumerate(available_workers):
+                start_row = i * rows_per_worker
+                end_row = min(start_row + rows_per_worker, H_out)
+
+                if start_row >= H_out:
+                    continue
+
+                in_start_y = start_row * layer.stride
+                in_end_y = (end_row - 1) * layer.stride + layer.kernel_size
+                input_patch = padded[:, in_start_y:in_end_y, :]
+
+                task_msg = TaskMessage(
+                    layer_type=layer.type,
+                    in_channels=layer.in_channels,
+                    in_h=input_patch.shape[1],
+                    in_w=input_patch.shape[2],
+                    out_channels=layer.out_channels,
+                    out_h=end_row - start_row,
+                    out_w=W_out,
+                    kernel_size=layer.kernel_size,
+                    stride=layer.stride,
+                    padding=layer.padding,
+                    groups=layer.groups,
+                    in_features=0,
+                    out_features=0,
+                    input_size=input_patch.size
+                )
+
+                task = asyncio.create_task(
+                    self._send_task_to_worker(worker, task_msg, input_patch)
+                )
+                tasks.append((worker, start_row, end_row, task))
+                logger.debug(f"[Coordinator]: Assigned rows {start_row}-{end_row} to worker {worker.worker_id} for layer {layer.name}")
+            
+            await asyncio.gather(*[t[3] for t in tasks])
+            output_shape = (layer.out_channels, H_out, W_out)
+            self.feature_map = await self._collect_results(tasks, output_shape)
+
+    async def _distribute_fc(self, layer: LayerConfig, quant_params: QuantParams):
+        pass
+
+    async def _apply_residual(self, residual_from: str):
+        pass
+
+    async def _send_task_to_worker(self, worker: WorkerInfo, task_msg: TaskMessage, input_patch: np.ndarray):
+        worker.state = WorkerState.BUSY
+        await self.worker_manager.send_message(worker, MessageType.TASK, task_msg.pack() + input_patch.tobytes())
+        logger.debug(f"[Coordinator]: Sent task for layer {self.current_layer_idx} to worker {worker.worker_id}, waiting for result...")
+
+    async def _collect_results(self, tasks: list[asyncio.Task], output_shape: tuple) -> np.ndarray:
+        output = np.zeros(output_shape, dtype=np.uint8)
+        num_workers = len(tasks)
+        logger.info(f"[Coordinator]: Collecting results from {num_workers} workers for layer {self.current_layer_idx}")
+        
+        receive_tasks = []
+        for worker, start_idx, end_idx, _ in tasks:
+            task = asyncio.create_task(
+                self._receive_worker_result(worker, start_idx, end_idx, output)
+            )
+            receive_tasks.append(task)
+        await asyncio.gather(*receive_tasks)
+        
+        return output
+    
+    async def _receive_worker_result(self, worker: WorkerInfo, start_idx: int, end_idx: int, output: np.ndarray):
+        try:
+            # 等待 RESULT 消息
+            header, payload = await self.worker_manager.receive_message(
+                worker, 
+                timeout=60
+            )
+            
+            if not (header and payload):
+                raise RuntimeError(f"Failed to receive result from worker {worker.worker_id}")
+            
+            if header.type != MessageType.RESULT:
+                raise RuntimeError(f"Expected RESULT, got {header.type}")
+            
+            result_msg = ResultMessage.unpack(payload)
+            
+            # 接收输出数据
+            output_data = await worker.reader.readexactly(result_msg.output_size)
+            
+            # 解析输出
+            if output.ndim == 3:
+                # Conv layer: (C, H_slice, W)
+                C, _, W = output.shape
+                H_slice = end_idx - start_idx
+                output_patch = np.frombuffer(output_data, dtype=np.uint8).reshape(
+                    (C, H_slice, W)
+                )
+                output[:, start_idx:end_idx, :] = output_patch
             else:
-                logger.warning(f"[Coordinator]: Unexpected message type {header.type} from worker {worker.worker_id}")
+                # Linear layer: (num_classes,)
+                output_patch = np.frombuffer(output_data, dtype=np.uint8)
+                output[start_idx:end_idx] = output_patch
+            
+            # 更新统计
+            self.stats.total_comm_volume += result_msg.output_size
+            self.stats.total_compute_time += result_msg.compute_time_us / 1e6
+            
+            # 标记 worker 为空闲
+            worker.state = WorkerState.IDLE
+            self.worker_manager.mark_worker_idle(worker)
+            
+            logger.debug(f"[Coordinator]: Received result from worker {worker.worker_id}, "
+                        f"slice [{start_idx}, {end_idx}), "
+                        f"compute time: {result_msg.compute_time_us / 1000:.2f} ms")
+        
+        except Exception as e:
+            logger.error(f"[Coordinator]: Error receiving result from worker {worker.worker_id}: {e}")
+            worker.state = WorkerState.DISCONNECTED
+            raise
 
-    async def handle_result(self, worker: WorkerInfo, payload: bytes):
-        # parse the result and update task status
-        logger.debug(f"[Coordinator]: Received result from worker {worker.worker_id}")
+    def _parse_layer_configs(self, json_path: str = 'model_config.json'):
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        logger.info(f"[Coordinator]: Loaded model config from {json_path}, total layers: {len(data['layers'])}")
+        
+        for layer_data in data["layer"]:
+            pass
+
+
+    def _parse_quant_params(self):
         pass
+            
+        
+            
+        
+            
 
-    async def handle_error(self, worker: WorkerInfo, payload: bytes):
-        # parse the error message and log it
-        error_msg = ErrorMessage.unpack(payload)
-        logger.error(f"[Coordinator]: Received error from worker {worker.worker_id}: {error_msg.error_code} - {error_msg.description}")
-        pass
+            
+            
+    
 
+    
 
-    async def task_dispatcher(self):
-        pass
-
-    async def stats_printer(self):
-        pass
+    
+    

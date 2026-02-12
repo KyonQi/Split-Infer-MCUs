@@ -36,10 +36,12 @@ struct MessageHeader {
     uint8_t reserved[6]; // for future use
 } __attribute__((packed)); // TODO need further check the attribute; 16 bytes for header
 
+// TODO Need to rename it to RegisterPayload
 struct RegisterMessage {
     uint32_t clock_mhz;
 } __attribute__((packed)); // TODO need further check the attribute; 24 bytes for payload
 
+// TODO Need to rename it to RegisterAckPayload
 struct RegisterAckMessage {
     uint8_t status; // 0 for success, non-zero for error code
     uint8_t assigned_id; // it should be the same as worker_id in header, but server can reassign if needed
@@ -68,7 +70,7 @@ struct ResultPayload {
     // maybe performance records here
 } __attribute__((packed)); // TODO need further check the attribute; 8 bytes for payload
 
-
+// TODO need to rename it to ErrorPayload
 struct ErrorMessage {
     uint8_t error_code;
     char description[63];

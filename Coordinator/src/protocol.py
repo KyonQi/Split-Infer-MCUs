@@ -15,6 +15,7 @@ class MessageType(IntEnum):
     TASK = 0x03, # server -> worker
     RESULT = 0x04, # worker -> server
     ERROR = 0x05, # worker -> server
+    HEARTBEAT = 0x06, # worker -> server
 
 class LayerType(IntEnum):
     CONV = 0x01,
@@ -72,7 +73,63 @@ class RegisterAckMessage:
 
     def pack(self) -> bytes:
         return struct.pack(RegisterAckMessage.FORMAT, self.status, self.assigned_id)
+
+# TODO optimize the payload structure, e.g. conv params and linear params don't need to be transmitted in the task message
+@dataclass
+class TaskMessage:
+    FORMAT = '<BIIIIIIBBBBIII'
+    SIZE = struct.calcsize(FORMAT)
     
+    layer_type: LayerType
+    # input/output channels and dimensions
+    in_channels: int
+    in_h: int
+    in_w: int
+
+    out_channels: int
+    out_h: int
+    out_w: int
+
+    # convolution parameters
+    kernel_size: int
+    stride: int
+    padding: int
+    groups: int
+
+    # linear parameters
+    in_features: int
+    out_features: int
+
+    # data
+    # TODO in bytes, the real data will be sent after the header and TaskMessage
+    # But really???
+    input_size: int 
+
+    def pack(self) -> bytes:
+        data = struct.pack('<B', self.layer_type)
+        data += struct.pack('<IIIIII', self.in_channels, self.in_h, self.in_w, self.out_channels, self.out_h, self.out_w)
+        data += struct.pack('<BBBB', self.kernel_size, self.stride, self.padding, self.groups)
+        data += struct.pack('<III', self.in_features, self.out_features, self.input_size)
+        return data
+
+
+@dataclass
+class ResultMessage:
+    FORMAT = '<II'
+    SIZE = struct.calcsize(FORMAT)
+    
+    compute_time_us: int
+    output_size: int # in bytes
+
+    @staticmethod
+    def unpack(data: bytes) -> 'ResultMessage':
+        if len(data) < ResultMessage.SIZE:
+            raise ValueError("Insufficient data for ResultMessage")
+        compute_time_us, output_size = struct.unpack(ResultMessage.FORMAT, data[:ResultMessage.SIZE])
+        return ResultMessage(compute_time_us, output_size)
+
+
+
 @dataclass
 class ErrorMessage:
     FORMAT = '<B63s'
