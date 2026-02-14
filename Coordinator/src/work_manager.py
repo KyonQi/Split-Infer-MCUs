@@ -3,8 +3,9 @@ import logging
 from enum import Enum
 from dataclasses import dataclass
 from .protocol import *
+# from .task_queue import *
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 class WorkerState(IntEnum):
     DISCONNECTED = 0
@@ -27,6 +28,9 @@ class WorkerManager:
         self.workers: dict[int, WorkerInfo] = {}
         self.next_worker_id = 0
 
+        # idle worker queue
+        self.idle_queue: asyncio.Queue[WorkerInfo] = asyncio.Queue()
+
     def add_worker(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> WorkerInfo:
         logger.info(f"[WorkerManager]: Adding new worker from {writer.get_extra_info('peername')}")
         worker_id = self.next_worker_id
@@ -45,8 +49,6 @@ class WorkerManager:
             
             del self.workers[worker.worker_id]
 
-
-
     async def send_message(self, worker: WorkerInfo, msg_type: MessageType, payload: bytes):
         try:
             header = MessageHeader(type=msg_type, worker_id=worker.worker_id, payload_len=len(payload))
@@ -61,8 +63,7 @@ class WorkerManager:
             logger.error(f"[WorkerManager]: Error sending message to worker {worker.worker_id}: {e}")
             worker.state = WorkerState.DISCONNECTED
             return False
-        
-
+    
     async def receive_message(self, worker: WorkerInfo, timeout=None) -> tuple[MessageHeader, bytes]:
         try:
             logger.debug(f"[WorkerManager]: Waiting for message from worker {worker.worker_id} with timeout {timeout}")
@@ -84,4 +85,15 @@ class WorkerManager:
             logger.error(f"[WorkerManager]: Error receiving message from worker {worker.worker_id}: {e}")
             worker.state = WorkerState.DISCONNECTED
             return None
+        
+    def mark_worker_idle(self, worker: WorkerInfo):
+        if worker.state != WorkerState.IDLE:
+            worker.state = WorkerState.IDLE
+            try:
+                self.idle_queue.put_nowait(worker)
+            except asyncio.QueueFull:
+                logger.warning(f"[WorkerManager]: Idle queue is full")
+            
+    async def heartbeat_monitor(self):
+        pass
 

@@ -232,7 +232,18 @@ class Coordinator:
             self.feature_map = await self._collect_results(tasks, output_shape)
 
     async def _distribute_fc(self, layer: LayerConfig, quant_params: QuantParams):
-        pass
+        """Split the feature map by output classes"""
+        input_vec = self.feature_map.flatten()
+        total_classes = layer.out_channels
+        available_workers = list(self.worker_manager.workers.values())
+        num_workers = len(available_workers) # TODO maybe get idle workers
+        classes_per_worker = int(np.ceil(total_classes / num_workers))
+
+        logger.info(f"[Coordinator]: Distributing FC layer {layer.name} with {total_classes} classes across {num_workers} workers")
+        
+        tasks = []
+        
+        
 
     async def _apply_residual(self, residual_from: str):
         pass
@@ -259,7 +270,7 @@ class Coordinator:
     
     async def _receive_worker_result(self, worker: WorkerInfo, start_idx: int, end_idx: int, output: np.ndarray):
         try:
-            # 等待 RESULT 消息
+            #  wait for result message
             header, payload = await self.worker_manager.receive_message(
                 worker, 
                 timeout=60
@@ -273,10 +284,10 @@ class Coordinator:
             
             result_msg = ResultMessage.unpack(payload)
             
-            # 接收输出数据
+            # read exact output data
             output_data = await worker.reader.readexactly(result_msg.output_size)
             
-            # 解析输出
+            # parse output data and write to the correct position in the output feature map
             if output.ndim == 3:
                 # Conv layer: (C, H_slice, W)
                 C, _, W = output.shape
@@ -290,12 +301,12 @@ class Coordinator:
                 output_patch = np.frombuffer(output_data, dtype=np.uint8)
                 output[start_idx:end_idx] = output_patch
             
-            # 更新统计
-            self.stats.total_comm_volume += result_msg.output_size
-            self.stats.total_compute_time += result_msg.compute_time_us / 1e6
+            # update stats
+            # self.stats.total_comm_volume += result_msg.output_size
+            # self.stats.total_compute_time += result_msg.compute_time_us / 1e6
             
-            # 标记 worker 为空闲
-            worker.state = WorkerState.IDLE
+            # mark worker idle again
+            # worker.state = WorkerState.IDLE
             self.worker_manager.mark_worker_idle(worker)
             
             logger.debug(f"[Coordinator]: Received result from worker {worker.worker_id}, "

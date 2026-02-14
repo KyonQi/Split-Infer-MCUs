@@ -22,13 +22,14 @@ void test_single_linear_layer() {
     uint32_t start = micros();
     linear::native_linear(&test_input[0], weights, bias, &output[0], cfg, qp);
     uint32_t elapsed = micros() - start;
-
+    
+    Serial.printf("Input: 1280, Output: 250\n");
     Serial.printf("LINEAR: Inference time: %u us\n", elapsed);
-    Serial.println("Output:");
-    for (size_t c = 0; c < qp->num_channels; ++c) {
-        Serial.printf("%u ", output[c]);
-    }
-    Serial.println("\n============================================");
+    // Serial.println("Output:");
+    // for (size_t c = 0; c < qp->num_channels; ++c) {
+    //     Serial.printf("%u ", output[c]);
+    // }
+    // Serial.println("\n============================================");
 }
 
 void setup() {
