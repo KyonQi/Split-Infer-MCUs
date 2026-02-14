@@ -48,7 +48,7 @@ class Coordinator:
         
         # inference managements
         self.feature_map: Optional[np.ndarray] = None
-        self.residual_buffers: dict[str, np.ndarray] = {}
+        self.residual_buffers: dict[str, tuple[np.ndarray, float, int]] = {}
         self.current_layer_idx: int = 0
         self.layer_config_list: list[LayerConfig] = [] # get the real vale by parsing the json file later
         self.quant_params_list: list[QuantParams] = [] # get the real value from calibration later
@@ -122,7 +122,6 @@ class Coordinator:
 
         # TODO need further dev
         self._parse_layer_configs() # parse the layer config and quant params from json file, and fill in the layer_config_list and quant_params_list
-        self._parse_quant_params() # parse the quant params from calibration result, and fill in the quant_params_list
         
         start_time = time.time()
 
@@ -152,7 +151,7 @@ class Coordinator:
 
     async def _run_layer(self, layer: LayerConfig, quant_params: QuantParams):
         if layer.residual_add_to:
-            self.residual_buffers[layer.residual_add_to] = self.feature_map.copy()
+            self.residual_buffers[layer.residual_add_to] = (self.feature_map.copy(), quant_params.s_in, quant_params.z_in)
             logger.debug(f"[Coordinator]: Stored residual buffer for {layer.residual_add_to} with shape {self.feature_map.shape}")
         
         # before fc, we needs a global average pooling and flatten
@@ -242,11 +241,63 @@ class Coordinator:
         logger.info(f"[Coordinator]: Distributing FC layer {layer.name} with {total_classes} classes across {num_workers} workers")
         
         tasks = []
+        for i, worker in enumerate(available_workers):
+            start_cls = i * classes_per_worker
+            end_cls = min(start_cls + classes_per_worker, total_classes)
+            
+            if start_cls >= total_classes:
+                continue
+            
+            task_msg = TaskMessage(
+                layer_type=layer.type,
+                in_channels=layer.in_channels,
+                in_h=1,
+                in_w=1,
+                out_channels=end_cls - start_cls,
+                out_h=1,
+                out_w=1,
+                kernel_size=0,
+                stride=0,
+                padding=0,
+                groups=0,
+                in_features=input_vec.size,
+                out_features=end_cls - start_cls,
+                input_size=input_vec.size
+            )
+            task = asyncio.create_task(
+                self._send_task_to_worker(worker, task_msg, input_vec)
+            )
+            tasks.append((worker, start_cls, end_cls, task))
+            logger.debug(f"[Coordinator]: Assigned classes {start_cls}-{end_cls} to worker {worker.worker_id} for FC layer {layer.name}")
+        await asyncio.gather(*[t[3] for t in tasks])
         
+        output_shape = (total_classes,)
+        self.feature_map = await self._collect_results(tasks, output_shape)
         
-
+    # TODO need further check
     async def _apply_residual(self, residual_from: str):
-        pass
+        if residual_from not in self.residual_buffers:
+            logger.error(f"[Coordinator]: Residual buffer {residual_from} not found for residual connection")
+            return
+        
+        cached, res_s, res_zp = self.residual_buffers[residual_from]
+        if cached.shape != self.feature_map.shape:
+            logger.error(f"[Coordinator]: Residual buffer shape {cached.shape} does not match current feature map shape {self.feature_map.shape}")
+            return
+        
+        res_f = (cached.astype(np.float32) - res_zp) * res_s
+
+        curr_scale = self.quant_params_list[self.current_layer_idx].s_out
+        curr_zero_point = self.quant_params_list[self.current_layer_idx].z_out
+        curr_f = (self.feature_map.astype(np.float32) - curr_zero_point) * curr_scale
+        
+        sum_f = curr_f + res_f
+        # TODO need to chaneg to get the real target scale and zero point
+        target_s = self.quant_params_list[self.current_layer_idx].s_out
+        target_z = self.quant_params_list[self.current_layer_idx].z_out
+        self.feature_map = np.clip(np.round(sum_f / target_s + target_z), 0, 255).astype(np.uint8)
+
+        logger.debug(f"[Coordinator]: Applied residual connection from {residual_from} to current layer {self.current_layer_idx}, feature map updated")
 
     async def _send_task_to_worker(self, worker: WorkerInfo, task_msg: TaskMessage, input_patch: np.ndarray):
         worker.state = WorkerState.BUSY
@@ -323,23 +374,38 @@ class Coordinator:
             data = json.load(f)
         logger.info(f"[Coordinator]: Loaded model config from {json_path}, total layers: {len(data['layers'])}")
         
-        for layer_data in data["layer"]:
-            pass
+        layer_configs = []
+        quant_params = []
+        for layer_data in data["layers"]:
+            layer_config_dict = layer_data["layer_config"]
+            quant_params_dict = layer_data["quant_params"]
 
+            layer_type = LayerType[layer_config_dict["type"]]
+            # TODO need change
+            cfg = LayerConfig(
+                name=layer_config_dict["name"],
+                type=layer_type,
+                layer_idx=len(layer_configs),
+                in_channels=layer_config_dict["in_channels"],
+                out_channels=layer_config_dict["out_channels"],
+                kernel_size=layer_config_dict["kernel_size"],
+                stride=layer_config_dict["stride"],
+                padding=layer_config_dict["padding"],
+            )
 
-    def _parse_quant_params(self):
-        pass
-            
-        
-            
-        
-            
+            qp = QuantParams(
+                s_in=float(quant_params_dict["s_in"]),
+                z_in=int(quant_params_dict["z_in"]),
+                s_w=np.array(quant_params_dict["s_w"], dtype=np.float32),
+                z_w=np.array(quant_params_dict["z_w"], dtype=np.int32),
+                s_out=float(quant_params_dict["s_out"]),
+                z_out=int(quant_params_dict["z_out"]),
+                m=np.array(quant_params_dict["m"], dtype=np.float32)    
+            )
 
-            
-            
-    
+            layer_configs.append(cfg)
+            quant_params.append(qp)
 
-    
-
-    
-    
+        self.layer_config_list = layer_configs
+        self.quant_params_list = quant_params
+        logger.info(f"[Coordinator]: Parsed {len(self.layer_config_list)} layers and quantization parameters from config")
