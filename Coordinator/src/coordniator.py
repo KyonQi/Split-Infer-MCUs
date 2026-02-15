@@ -66,7 +66,7 @@ class Coordinator:
             asyncio.create_task(server.serve_forever()), # start to listen
             # asyncio.create_task(self.task_dispatcher()), # start to dispatch tasks
             asyncio.create_task(self.worker_manager.heartbeat_monitor()), # start to monitor worker heartbeat
-            asyncio.create_task(self.stats_printer()), # start to print stats
+            # asyncio.create_task(self.stats_printer()), # start to print stats
         ]
         try:
             await asyncio.gather(*tasks)
@@ -87,12 +87,14 @@ class Coordinator:
             result: tuple[MessageHeader, bytes] = await self.worker_manager.receive_message(worker, timeout=2)
             if not result:
                 logger.error("[Coordinator]: Failed to receive registration message from worker")
+                self.worker_manager.remove_worker(worker)
                 return
             
             # check header and payload
             header, payload = result
             if header.type != MessageType.REGISTER:
                 logger.error(f"[Coordinator]: Expected REGISTER message, got {header.type}")
+                self.worker_manager.remove_worker(worker)   
                 return
             reg_msg = RegisterMessage.unpack(payload)
             worker.clock_mhz = reg_msg.clock_mhz
@@ -122,7 +124,7 @@ class Coordinator:
 
         # TODO need further dev
         self._parse_layer_configs() # parse the layer config and quant params from json file, and fill in the layer_config_list and quant_params_list
-        self.feature_map = input_data.copy()
+        self.feature_map = self._quantize_input(input_data, self.quant_params_list[0]) # quantize the input data to uint8, and fill in the feature_map
         self.residual_buffers.clear()
         
         start_time = time.time()
@@ -369,7 +371,7 @@ class Coordinator:
             worker.state = WorkerState.DISCONNECTED
             raise
 
-    def _parse_layer_configs(self, json_path: str = 'model_config.json'):
+    def _parse_layer_configs(self, json_path: str = './src/model_config.json'):
         with open(json_path, 'r') as f:
             data = json.load(f)
         logger.info(f"[Coordinator]: Loaded model config from {json_path}, total layers: {len(data['layers'])}")
@@ -380,7 +382,7 @@ class Coordinator:
             layer_config_dict = layer_data["layer_config"]
             quant_params_dict = layer_data["quant_params"]
 
-            layer_type = LayerType[layer_config_dict["type"]]
+            layer_type = LayerType(layer_config_dict["type"])
             # TODO need change
             cfg = LayerConfig(
                 name=layer_config_dict["name"],
@@ -412,3 +414,9 @@ class Coordinator:
         self.layer_config_list = layer_configs
         self.quant_params_list = quant_params
         logger.info(f"[Coordinator]: Parsed {len(self.layer_config_list)} layers and quantization parameters from config")
+    
+    def _quantize_input(self, input_data: np.ndarray, quant_params: QuantParams) -> np.ndarray:
+        s_in = quant_params.s_in
+        z_in = quant_params.z_in
+        quantized = np.clip(np.round(input_data / s_in + z_in), 0, 255).astype(np.uint8)
+        return quantized

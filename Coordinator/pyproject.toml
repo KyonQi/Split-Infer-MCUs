@@ -8,4 +8,5 @@ dependencies = [
     "asyncio>=4.0.0",
     "dataclasses>=0.8",
     "numpy>=2.2.6",
+    "pillow>=12.1.1",
 ]

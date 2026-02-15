@@ -58,8 +58,6 @@ void Worker::Loop() {
     case WorkerState::SENDING_RESULT:
         HandleSendingResult();
         break;
-        
-    
     default:
         break;
     }
