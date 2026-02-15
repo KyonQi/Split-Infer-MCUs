@@ -104,6 +104,8 @@ class Coordinator:
             ack_msg = RegisterAckMessage(status=0, assigned_id=worker.worker_id)
             await self.worker_manager.send_message(worker, MessageType.REGISTER_ACK, ack_msg.pack())
 
+            # TODO we need 3 steps handshake for better synchronization, but currently we just assume everything goes fine after registration
+
             # everything goes fine, worker -> idle, waiting for task assignment
             # go to event loop, waiting for messages from worker, which can be either RESULT or ERROR
             # worker.state = WorkerState.IDLE
@@ -225,7 +227,7 @@ class Coordinator:
                 self._send_task_to_worker(worker, task_msg, input_patch)
             )
             tasks.append((worker, start_row, end_row, task))
-            logger.debug(f"[Coordinator]: Assigned rows {start_row}-{end_row} to worker {worker.worker_id} for layer {layer.name}")
+            logger.debug(f"[Coordinator]: Assigned output rows {start_row}-{end_row} to worker {worker.worker_id} for layer {layer.name}")
         
         await asyncio.gather(*[t[3] for t in tasks])
         output_shape = (layer.out_channels, H_out, W_out)

@@ -90,7 +90,7 @@ void Worker::HandleRegistering() {
     uint32_t start_time = millis();
     while (millis() - start_time < 5000) { // wait for 5 seconds
         if (client_.available() >= sizeof(MessageHeader)) {
-            client_.read((uint8_t *)&header, sizeof(header));
+            Read((uint8_t *)&header, sizeof(header));
             if (header.magic != PROTOCOL_MAGIC || header.type != MessageType::REGISTER_ACK) {
                 Serial.printf("Worker %d receive: 0x%08x, type: %d\n", worker_id_, header.magic, header.type);
                 Serial.println("Invalid registration ack received, ignoring...");
@@ -101,7 +101,8 @@ void Worker::HandleRegistering() {
                 Serial.println("Invalid registration ack payload length, ignoring...");
                 continue;
             }
-            client_.read((uint8_t *)&ack_msg, sizeof(RegisterAckMessage));
+            Read((uint8_t *)&ack_msg, sizeof(ack_msg)); // TODO error handling
+            
             if (ack_msg.status != 0) {
                 Serial.printf("Registration failed with error code %d\n", ack_msg.status);
                 
