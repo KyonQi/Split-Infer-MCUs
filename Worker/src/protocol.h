@@ -49,6 +49,7 @@ struct RegisterAckMessage {
 
 struct TaskPayload {
     LayerType layer_type;
+    uint32_t layer_idx;
 
     // input/output channels
     uint32_t in_channels, in_h, in_w;

@@ -170,7 +170,7 @@ void Worker::HandleReceivingTask() {
 void Worker::HandleComputing() {
     Serial.printf("Worker %d processing task %d...\n", worker_id_, static_cast<uint8_t>(current_task_.layer_type));
     // uint32_t start_time = micros();
-    int layer_idx = 0; // TODO need to get from task payload
+    int layer_idx = current_task_.layer_idx; // TODO need to get from task payload
     bool success = false;
     uint8_t *input = input_buffer_;
     const int8_t *weights = model_weights[layer_idx].weights;
@@ -205,12 +205,15 @@ void Worker::HandleComputing() {
 
 void Worker::HandleSendingResult() {
     Serial.printf("Worker %d sending result...\n", worker_id_);
+    MessageHeader header;
+    init_header(header, MessageType::RESULT, worker_id_, sizeof(ResultPayload));
+
+    Send((const uint8_t *)&header, sizeof(header));
     Send((const uint8_t *)&current_result_, sizeof(current_result_));
     Send(output_buffer_, current_result_.output_size);
+    
     state_ = WorkerState::IDLE;
 }
-
-
 
 void Worker::SendError(ErrorCode code, const char *description) {
     MessageHeader header;

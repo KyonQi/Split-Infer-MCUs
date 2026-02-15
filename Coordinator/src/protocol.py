@@ -77,10 +77,11 @@ class RegisterAckMessage:
 # TODO optimize the payload structure, e.g. conv params and linear params don't need to be transmitted in the task message
 @dataclass
 class TaskMessage:
-    FORMAT = '<BIIIIIIBBBBIII'
+    FORMAT = '<BIIIIIIIBBBBIII'
     SIZE = struct.calcsize(FORMAT)
     
     layer_type: LayerType
+    layer_idx: int
     # input/output channels and dimensions
     in_channels: int
     in_h: int
@@ -106,7 +107,7 @@ class TaskMessage:
     input_size: int 
 
     def pack(self) -> bytes:
-        data = struct.pack('<B', self.layer_type)
+        data = struct.pack('<BI', self.layer_type, self.layer_idx)
         data += struct.pack('<IIIIII', self.in_channels, self.in_h, self.in_w, self.out_channels, self.out_h, self.out_w)
         data += struct.pack('<BBBB', self.kernel_size, self.stride, self.padding, self.groups)
         data += struct.pack('<III', self.in_features, self.out_features, self.input_size)

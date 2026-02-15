@@ -122,12 +122,10 @@ class Coordinator:
 
         # TODO need further dev
         self._parse_layer_configs() # parse the layer config and quant params from json file, and fill in the layer_config_list and quant_params_list
-        
-        start_time = time.time()
-
         self.feature_map = input_data.copy()
         self.residual_buffers.clear()
         
+        start_time = time.time()
         for layer_idx, (layer, quant_params) in enumerate(zip(self.layer_config_list, self.quant_params_list)):
             self.current_layer_idx = layer_idx
             logger.debug(f"[Coordinator]: Executing layer {layer_idx} - {layer.name} ({layer.type})")
@@ -187,48 +185,49 @@ class Coordinator:
         else:
             padded = self.feature_map
         
-            available_workers = list(self.worker_manager.workers.values())
-            num_workers = len(available_workers) # TODO maybe get idle workers
-            rows_per_worker = int(np.ceil(H_out / num_workers))
-            tasks = []
-            
-            for i, worker in enumerate(available_workers):
-                start_row = i * rows_per_worker
-                end_row = min(start_row + rows_per_worker, H_out)
+        available_workers = list(self.worker_manager.workers.values())
+        num_workers = len(available_workers) # TODO maybe get idle workers
+        rows_per_worker = int(np.ceil(H_out / num_workers))
+        tasks = []
+        
+        for i, worker in enumerate(available_workers):
+            start_row = i * rows_per_worker
+            end_row = min(start_row + rows_per_worker, H_out)
 
-                if start_row >= H_out:
-                    continue
+            if start_row >= H_out:
+                continue
 
-                in_start_y = start_row * layer.stride
-                in_end_y = (end_row - 1) * layer.stride + layer.kernel_size
-                input_patch = padded[:, in_start_y:in_end_y, :]
+            in_start_y = start_row * layer.stride
+            in_end_y = (end_row - 1) * layer.stride + layer.kernel_size
+            input_patch = padded[:, in_start_y:in_end_y, :]
 
-                task_msg = TaskMessage(
-                    layer_type=layer.type,
-                    in_channels=layer.in_channels,
-                    in_h=input_patch.shape[1],
-                    in_w=input_patch.shape[2],
-                    out_channels=layer.out_channels,
-                    out_h=end_row - start_row,
-                    out_w=W_out,
-                    kernel_size=layer.kernel_size,
-                    stride=layer.stride,
-                    padding=layer.padding,
-                    groups=layer.groups,
-                    in_features=0,
-                    out_features=0,
-                    input_size=input_patch.size
-                )
+            task_msg = TaskMessage(
+                layer_type=layer.type,
+                layer_idx=self.current_layer_idx,
+                in_channels=layer.in_channels,
+                in_h=input_patch.shape[1],
+                in_w=input_patch.shape[2],
+                out_channels=layer.out_channels,
+                out_h=end_row - start_row,
+                out_w=W_out,
+                kernel_size=layer.kernel_size,
+                stride=layer.stride,
+                padding=layer.padding,
+                groups=layer.groups,
+                in_features=0,
+                out_features=0,
+                input_size=input_patch.size
+            )
 
-                task = asyncio.create_task(
-                    self._send_task_to_worker(worker, task_msg, input_patch)
-                )
-                tasks.append((worker, start_row, end_row, task))
-                logger.debug(f"[Coordinator]: Assigned rows {start_row}-{end_row} to worker {worker.worker_id} for layer {layer.name}")
-            
-            await asyncio.gather(*[t[3] for t in tasks])
-            output_shape = (layer.out_channels, H_out, W_out)
-            self.feature_map = await self._collect_results(tasks, output_shape)
+            task = asyncio.create_task(
+                self._send_task_to_worker(worker, task_msg, input_patch)
+            )
+            tasks.append((worker, start_row, end_row, task))
+            logger.debug(f"[Coordinator]: Assigned rows {start_row}-{end_row} to worker {worker.worker_id} for layer {layer.name}")
+        
+        await asyncio.gather(*[t[3] for t in tasks])
+        output_shape = (layer.out_channels, H_out, W_out)
+        self.feature_map = await self._collect_results(tasks, output_shape)
 
     async def _distribute_fc(self, layer: LayerConfig, quant_params: QuantParams):
         """Split the feature map by output classes"""
@@ -250,6 +249,7 @@ class Coordinator:
             
             task_msg = TaskMessage(
                 layer_type=layer.type,
+                layer_idx=self.current_layer_idx,
                 in_channels=layer.in_channels,
                 in_h=1,
                 in_w=1,
@@ -376,7 +376,7 @@ class Coordinator:
         
         layer_configs = []
         quant_params = []
-        for layer_data in data["layers"]:
+        for idx, layer_data in enumerate(data["layers"]):
             layer_config_dict = layer_data["layer_config"]
             quant_params_dict = layer_data["quant_params"]
 
@@ -385,12 +385,15 @@ class Coordinator:
             cfg = LayerConfig(
                 name=layer_config_dict["name"],
                 type=layer_type,
-                layer_idx=len(layer_configs),
+                layer_idx=idx,
                 in_channels=layer_config_dict["in_channels"],
                 out_channels=layer_config_dict["out_channels"],
                 kernel_size=layer_config_dict["kernel_size"],
                 stride=layer_config_dict["stride"],
                 padding=layer_config_dict["padding"],
+                groups=layer_config_dict["groups"],
+                residual_add_to=layer_config_dict["residual_add_to"],
+                residual_connect_from=layer_config_dict["residual_connect_from"]
             )
 
             qp = QuantParams(
