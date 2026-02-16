@@ -6,8 +6,8 @@
 #include "conv/conv2d.h"
 #include "linear/linear.h"
 
-DMAMEM uint8_t Worker::input_buffer_[64 * 1024];
-DMAMEM uint8_t Worker::output_buffer_[64 * 1024];
+DMAMEM uint8_t Worker::input_buffer_[150 * 1024];
+DMAMEM uint8_t Worker::output_buffer_[150 * 1024];
 
 Worker::Worker(uint8_t worker_id, IPAddress svr_ip, uint16_t svr_port)
     : worker_id_(worker_id), svr_ip_(svr_ip), svr_port_(svr_port), is_connected_(false) {
@@ -136,6 +136,7 @@ void Worker::SendRegistration() {
 
 void Worker::HandleIdle() {
     // check if there is a new task
+    Serial.printf("Worker %d idle, waiting for tasks...\n", worker_id_);
     if (client_.available() >= sizeof(MessageHeader)) {
         MessageHeader header;
         Read((uint8_t *)&header, sizeof(header)); // TODO notice we need nonblocking way here; also error handling maybe
@@ -209,7 +210,28 @@ void Worker::HandleSendingResult() {
 
     Send((const uint8_t *)&header, sizeof(header));
     Send((const uint8_t *)&current_result_, sizeof(current_result_));
-    Send(output_buffer_, current_result_.output_size);
+
+    // debug printf the output data in hex
+    Serial.printf("Output data (hex): ");
+    for (size_t i = 0; i < current_result_.output_size && i < 64; i++) { // only print the first 64 bytes for debug
+        Serial.printf("%02X ", output_buffer_[i]);
+    }
+    Serial.println();
+
+    // 3. 分块发送大数据
+    const size_t CHUNK_SIZE = 1024;  // 每次发 1KB，适配嵌入式 TCP 缓冲区
+    size_t total = current_result_.output_size;
+    size_t offset = 0;
+    
+    while (offset < total) {
+        size_t chunk = min(CHUNK_SIZE, total - offset);
+        Send((const uint8_t *)&output_buffer_[offset], chunk);
+        offset += chunk;
+    }
+
+    // Send(output_buffer_, current_result_.output_size);
+    client_.flush();
+    Serial.printf("Worker %d finish sending...\n", worker_id_);
     
     state_ = WorkerState::IDLE;
 }
@@ -227,12 +249,46 @@ void Worker::SendError(ErrorCode code, const char *description) {
     Serial.printf("Worker %d sent error message: %s\n", worker_id_, err_msg.description);
 }
 
+
 void Worker::Send(const uint8_t *buffer, size_t size) {
-    if (client_.connected()) {
-        client_.write(buffer, size);
+    size_t bytes_sent = 0;
+    while (bytes_sent < size) {
+        int n = client_.write(buffer + bytes_sent, size - bytes_sent);
+        if (n > 0) {
+            bytes_sent += n;
+        } else if (n == 0) {
+            // 缓冲区暂时满了，yield 让出 CPU，等待缓冲区腾出空间
+            // 不要 break！
+            if (!client_.connected()) {
+                Serial.println("Connection lost while sending");
+                break;
+            }
+            delay(1);  // 或者 yield(); 取决于你的 RTOS/平台
+        } else {
+            // n < 0 才是真正的错误
+            Serial.println("Error sending data to server");
+            break;
+        }
     }
-    client_.flush();
+    // 不要在这里 flush()，或者只在最后一帧结束后 flush 一次
 }
+
+// void Worker::Send(const uint8_t *buffer, size_t size) {
+//     size_t bytes_sent = 0;
+//     while (bytes_sent < size) {
+//         int n = client_.write(buffer + bytes_sent, size - bytes_sent);
+//         if (n > 0) {
+//             bytes_sent += n;
+//         } else {
+//             Serial.println("Error sending data to server");
+//             break;
+//         }
+//     }
+//     // if (client_.connected()) {
+//     //     client_.write(buffer, size);
+//     // }
+//     client_.flush();
+// }
 
 // TODO blocking read, how to unblocking?
 void Worker::Read(uint8_t *buffer, size_t size) {

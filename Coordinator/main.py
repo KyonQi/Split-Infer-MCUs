@@ -25,20 +25,20 @@ async def main(workers: int):
     logger.info("Coordinator is starting...")
     server_task = asyncio.create_task(coord.start()) # start will block until the server is closed so we run it in a separate task
     await wait_for_workers(coord, workers) # block until all workes have connected
-    # try:
-    #     # Load and prepare input data (example)
-    #     # input_image_path = Path("./data/panda.jpg")
-    #     # input_image = Image.open(input_image_path).convert("RGB")
-    #     # input_data = np.array(input_image).transpose(2, 0, 1)
-    #     input_image = np.random.rand(3, 224, 224).astype(np.float32)
-    #     output = await coord.execute_inference(input_image)
-    #     logger.debug(f"Inference output: {output}")
-    # finally:
-    #     coord.running = False
-    #     server_task.cancel()
-    #     with contextlib.suppress(asyncio.CancelledError):
-    #         await server_task
-    #     logger.info("Coordinator has shut down.")        
+    try:
+        # Load and prepare input data (example)
+        # input_image_path = Path("./data/panda.jpg")
+        # input_image = Image.open(input_image_path).convert("RGB")
+        # input_data = np.array(input_image).transpose(2, 0, 1)
+        input_image = np.random.rand(3, 56, 56).astype(np.float32)
+        output = await coord.execute_inference(input_image)
+        logger.debug(f"Inference output: {output}")
+    finally:
+        coord.running = False
+        server_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await server_task
+        logger.info("Coordinator has shut down.")        
 
 
 if __name__ == "__main__":

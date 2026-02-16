@@ -93,7 +93,7 @@ class Coordinator:
             # check header and payload
             header, payload = result
             if header.type != MessageType.REGISTER:
-                logger.error(f"[Coordinator]: Expected REGISTER message, got {header.type}")
+                logger.error(f"[Coordinator]: Expected REGISTER message, got {LayerType(header.type)}")
                 self.worker_manager.remove_worker(worker)   
                 return
             reg_msg = RegisterMessage.unpack(payload)
@@ -132,7 +132,7 @@ class Coordinator:
         start_time = time.time()
         for layer_idx, (layer, quant_params) in enumerate(zip(self.layer_config_list, self.quant_params_list)):
             self.current_layer_idx = layer_idx
-            logger.debug(f"[Coordinator]: Executing layer {layer_idx} - {layer.name} ({layer.type})")
+            logger.debug(f"[Coordinator]: Executing layer {layer_idx} - {layer.name} ({LayerType(layer.type)})")
             
             layer_start = time.perf_counter()
             await self._run_layer(layer, quant_params)
@@ -335,12 +335,15 @@ class Coordinator:
                 raise RuntimeError(f"Failed to receive result from worker {worker.worker_id}")
             
             if header.type != MessageType.RESULT:
-                raise RuntimeError(f"Expected RESULT, got {header.type}")
+                raise RuntimeError(f"Expected RESULT, got {LayerType(header.type)}")
             
             result_msg = ResultMessage.unpack(payload)
+            logger.debug(f"[Coordinator]: result message: {result_msg}")
             
             # read exact output data
-            output_data = await worker.reader.readexactly(result_msg.output_size)
+            # output_data = await worker.reader.readexactly(result_msg.output_size)
+            output_data = await asyncio.wait_for(worker.reader.readexactly(result_msg.output_size), timeout=10)
+            logger.debug(f"[Coordinator]: Received result header from worker {worker.worker_id} with output size {result_msg.output_size} bytes")
             
             # parse output data and write to the correct position in the output feature map
             if output.ndim == 3:
@@ -350,6 +353,7 @@ class Coordinator:
                 output_patch = np.frombuffer(output_data, dtype=np.uint8).reshape(
                     (C, H_slice, W)
                 )
+                logger.debug(f"[Coordinator]: output_data size: {len(output_data)} bytes, reshaped to {output_patch.shape}")
                 output[:, start_idx:end_idx, :] = output_patch
             else:
                 # Linear layer: (num_classes,)
