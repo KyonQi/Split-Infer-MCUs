@@ -30,10 +30,12 @@ async def main(workers: int):
         # input_image_path = Path("./data/panda.jpg")
         # input_image = Image.open(input_image_path).convert("RGB")
         # input_data = np.array(input_image).transpose(2, 0, 1)
-        input_image = np.random.rand(3, 56, 56).astype(np.float32)
+        input_image = np.random.rand(3, 224, 224).astype(np.float32)
         output = await coord.execute_inference(input_image)
         logger.debug(f"Inference output: {output}")
     finally:
+        # send shutdown message to all workers so they can clean up and exit gracefully
+        await coord.shutdown_workers()
         coord.running = False
         server_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

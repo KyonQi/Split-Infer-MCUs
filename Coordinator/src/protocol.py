@@ -16,6 +16,7 @@ class MessageType(IntEnum):
     RESULT = 0x04, # worker -> server
     ERROR = 0x05, # worker -> server
     HEARTBEAT = 0x06, # worker -> server
+    SHUTDOWN = 0x07, # server -> worker
 
 class LayerType(IntEnum):
     CONV = 0x01,
@@ -77,7 +78,7 @@ class RegisterAckMessage:
 # TODO optimize the payload structure, e.g. conv params and linear params don't need to be transmitted in the task message
 @dataclass
 class TaskMessage:
-    FORMAT = '<BIIIIIIIBBBBIII'
+    FORMAT = '<BIIIIIIIBBBHIII'
     SIZE = struct.calcsize(FORMAT)
     
     layer_type: LayerType
@@ -109,7 +110,7 @@ class TaskMessage:
     def pack(self) -> bytes:
         data = struct.pack('<BI', self.layer_type, self.layer_idx)
         data += struct.pack('<IIIIII', self.in_channels, self.in_h, self.in_w, self.out_channels, self.out_h, self.out_w)
-        data += struct.pack('<BBBB', self.kernel_size, self.stride, self.padding, self.groups)
+        data += struct.pack('<BBBH', self.kernel_size, self.stride, self.padding, self.groups)
         data += struct.pack('<III', self.in_features, self.out_features, self.input_size)
         return data
 

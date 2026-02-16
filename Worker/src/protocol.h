@@ -18,6 +18,8 @@ enum class MessageType : uint8_t {
     TASK = 0x03, // server -> worker
     RESULT = 0x04, // worker -> server
     ERROR = 0x05, // worker -> server
+    HEARTBEAT = 0x06, // worker -> server option TODO
+    SHUTDOWN = 0x07, // server -> worker
 };
 
 // TODO need further check
@@ -56,7 +58,8 @@ struct TaskPayload {
     uint32_t out_channels, out_h, out_w;
 
     // convolution parameters
-    uint8_t kernel_size, stride, padding, groups;
+    uint8_t kernel_size, stride, padding;
+    uint16_t groups;
 
     // linear parameters
     uint32_t in_features, out_features;

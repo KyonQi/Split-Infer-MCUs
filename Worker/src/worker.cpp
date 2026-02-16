@@ -6,8 +6,8 @@
 #include "conv/conv2d.h"
 #include "linear/linear.h"
 
-DMAMEM uint8_t Worker::input_buffer_[150 * 1024];
-DMAMEM uint8_t Worker::output_buffer_[150 * 1024];
+uint8_t Worker::input_buffer_[350 * 1024];  // RAM1: 350KB
+DMAMEM uint8_t Worker::output_buffer_[350 * 1024];  // RAM2: 350KB
 
 Worker::Worker(uint8_t worker_id, IPAddress svr_ip, uint16_t svr_port)
     : worker_id_(worker_id), svr_ip_(svr_ip), svr_port_(svr_port), is_connected_(false) {
@@ -148,6 +148,13 @@ void Worker::HandleIdle() {
             state_ = WorkerState::RECEIVING_TASK;
             return;
         }
+        if (header.type == MessageType::SHUTDOWN) {
+            client_.stop();
+            is_connected_ = false;
+            // Serial.printf("Worker %d received shutdown message, disconnecting...\n", worker_id_);
+            state_ = WorkerState::DISCONNECTED;
+            return;
+        }
         // TODO maybe adds shutdown message here
     }
 }
@@ -176,6 +183,7 @@ void Worker::HandleComputing() {
     const int8_t *weights = model_weights[layer_idx].weights;
     const int32_t *bias = model_weights[layer_idx].bias;
     uint8_t *output = output_buffer_;
+    uint32_t task_start_time = micros();
     switch (current_task_.layer_type) {
         case LayerType::CONV:
             conv2d::native_conv2d(input, weights, bias, output, 
@@ -183,6 +191,10 @@ void Worker::HandleComputing() {
                                     current_task_.in_h, current_task_.in_w);
             success = true;
             break;
+        case LayerType::DEPTHWISE:
+            conv2d::depthwise_conv2d(input, weights, bias, output, 
+                                    &model_layer_config[layer_idx], &model_quant_params[layer_idx],
+                                    current_task_.in_h, current_task_.in_w);
         case LayerType::FC:
             linear::native_linear(input, weights, bias, output,
                                     &model_layer_config[layer_idx], &model_quant_params[layer_idx]);
@@ -191,6 +203,7 @@ void Worker::HandleComputing() {
         default:
             break;
     }
+    uint32_t task_elapsed_time = micros() - task_start_time;
     if (!success) {
         Serial.println("Invalid layer type in task");
         SendError(ErrorCode::ERR_INVALID_TASK, "Invalid layer type in task");
@@ -198,7 +211,7 @@ void Worker::HandleComputing() {
         return;
     }
     // uint32_t compute_time = micros() - start_time;
-    current_result_.compute_time_us = 0; // TODO need to get the actual compute time
+    current_result_.compute_time_us = task_elapsed_time;
     current_result_.output_size = current_task_.out_channels * current_task_.out_h * current_task_.out_w; // TODO need to check the actual output size
     state_ = WorkerState::SENDING_RESULT;
 }

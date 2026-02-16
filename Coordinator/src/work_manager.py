@@ -55,7 +55,7 @@ class WorkerManager:
             worker.writer.write(header.pack())
             if payload:
                 worker.writer.write(payload)
-            await worker.writer.drain()
+            # await worker.writer.drain() #TODO further check if we really need to await drain here, i dont think so right now cuz we have error message back from MCU
             
             return True
         
@@ -68,7 +68,7 @@ class WorkerManager:
         try:
             logger.debug(f"[WorkerManager]: Waiting for message from worker {worker.worker_id} with timeout {timeout}")
             header_data = await asyncio.wait_for(worker.reader.readexactly(MessageHeader.SIZE), timeout=timeout)
-            logger.debug(f"Received header data: {header_data.hex()}")
+            logger.debug(f"Received header data from worker {worker.worker_id}: {header_data.hex()}")
             header = MessageHeader.unpack(header_data)
 
             payload = b''    

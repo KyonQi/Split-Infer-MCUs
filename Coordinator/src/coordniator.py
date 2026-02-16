@@ -334,6 +334,11 @@ class Coordinator:
             if not (header and payload):
                 raise RuntimeError(f"Failed to receive result from worker {worker.worker_id}")
             
+            if header.type == MessageType.ERROR:
+                err_msg = ErrorMessage.unpack(payload)
+                logger.error(f"[Coordinator]: Received error from worker {worker.worker_id}: error code: {err_msg.error_code}, message: {err_msg.description}")
+                raise RuntimeError(f"error: {err_msg.description}")
+            
             if header.type != MessageType.RESULT:
                 raise RuntimeError(f"Expected RESULT, got {LayerType(header.type)}")
             
@@ -353,7 +358,7 @@ class Coordinator:
                 output_patch = np.frombuffer(output_data, dtype=np.uint8).reshape(
                     (C, H_slice, W)
                 )
-                logger.debug(f"[Coordinator]: output_data size: {len(output_data)} bytes, reshaped to {output_patch.shape}")
+                logger.debug(f"[Coordinator]: worker:{worker.worker_id}, output_data size: {len(output_data)} bytes, reshaped to {output_patch.shape}")
                 output[:, start_idx:end_idx, :] = output_patch
             else:
                 # Linear layer: (num_classes,)
@@ -374,8 +379,17 @@ class Coordinator:
         
         except Exception as e:
             logger.error(f"[Coordinator]: Error receiving result from worker {worker.worker_id}: {e}")
+            await self.shutdown_workers() # if any error happens, we shutdown all workers to avoid hanging
             worker.state = WorkerState.DISCONNECTED
             raise
+    
+    async def shutdown_workers(self):
+        logger.info(f"[Coordinator]: Sending shutdown message to all workers")
+        shutdown_msg = b'' # no payload needed for shutdown
+        for worker in self.worker_manager.workers.values():
+            await self.worker_manager.send_message(worker, MessageType.SHUTDOWN, shutdown_msg)
+        #  await self.worker_manager.send_message(worker, MessageType.TASK, task_msg.pack() + input_patch.tobytes())
+
 
     def _parse_layer_configs(self, json_path: str = './src/model_config.json'):
         with open(json_path, 'r') as f:

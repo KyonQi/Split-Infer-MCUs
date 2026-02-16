@@ -55,8 +55,8 @@ private:
     
     bool is_connected_;
 
-    static uint8_t input_buffer_[150 * 1024];
-    static uint8_t output_buffer_[150 * 1024];
+    static uint8_t input_buffer_[350 * 1024];
+    static uint8_t output_buffer_[350 * 1024];
 };
 
 #endif // WORKER_H
