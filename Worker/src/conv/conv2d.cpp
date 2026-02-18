@@ -15,8 +15,10 @@ void native_conv2d(const uint8_t *input, const int8_t *weights, const int32_t *b
                     const uint8_t in_h, const uint8_t in_w) {
     // native convolution implementation for testing
     // const int in_h = 4, in_w = 4;
-    const int out_h = (in_h + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
-    const int out_w = (in_w + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+    // const int out_h = (in_h + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+    // const int out_w = (in_w + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+    const int out_h = (in_h - cfg->kernel_size) / cfg->stride + 1;
+    const int out_w = (in_w - cfg->kernel_size) / cfg->stride + 1;
 
     for (size_t oc = 0; oc < cfg->output_channels; ++oc) {
         int32_t bias_val = bias[oc];
@@ -28,8 +30,10 @@ void native_conv2d(const uint8_t *input, const int8_t *weights, const int32_t *b
             for (size_t ow = 0; ow < out_w; ++ow) {
                 int32_t acc = bias_val;
 
-                int start_y = oh * cfg->stride - cfg->padding; // input y coordinate corresponding to output (oh, ow)
-                int start_x = ow * cfg->stride - cfg->padding; // input x coordinate corresponding to output (oh, ow)
+                // int start_y = oh * cfg->stride - cfg->padding; // input y coordinate corresponding to output (oh, ow)
+                // int start_x = ow * cfg->stride - cfg->padding; // input x coordinate corresponding to output (oh, ow)
+                int start_y = oh * cfg->stride; // input y coordinate corresponding to output (oh, ow)
+                int start_x = ow * cfg->stride; // input x coordinate corresponding to output (oh, ow)
 
                 for (size_t ic = 0; ic < cfg->input_channels; ++ic) {
                     for (size_t kh = 0; kh < cfg->kernel_size; ++kh) {
@@ -51,10 +55,50 @@ void native_conv2d(const uint8_t *input, const int8_t *weights, const int32_t *b
 
                 // requantize
                 float acc_float = acc * multiplier + qp->output_zero_point;
+
+#ifdef DEBUG
+                if (oc == 1 && oh == 0 && ow == 0) {
+                    Serial.printf("acc: %d, multiplier: %f, output_zero_point: %d, acc_float: %f\n", acc, multiplier, qp->output_zero_point, acc_float);
+                    Serial.flush();
+                }
+#endif
                 int o_idx = oc * out_h * out_w + oh * out_w + ow;
                 output[o_idx] = (uint8_t) max( 0, min(255, (int32_t) roundf(acc_float) ) );      
             }
         }
+#ifdef DEBUG
+
+        if (cfg->output_channels == 32 && oc == 1) {
+            // first print input channels first 3x3 patch for debug
+            Serial.printf("Input: \n");
+            for (size_t ic = 0; ic < cfg->input_channels; ++ic) {
+                Serial.printf("Input channel %d: \n", ic);
+                for (size_t ih = 0; ih < 3; ++ih) {
+                    for (size_t iw = 0; iw < 3; ++iw) {
+                        Serial.printf("%d ", input[ic * in_h * in_w + ih * in_w + iw]);
+                    }
+                    Serial.println();
+                }
+            }
+            Serial.printf("Weight: \n"); // only print weights for output channel 1 for debug
+            for (size_t ic = 0; ic < cfg->input_channels; ++ic) {
+                Serial.printf("Weight for input channel %d: \n", ic);
+                for (size_t kh = 0; kh < cfg->kernel_size; ++kh) {
+                    for (size_t kw = 0; kw < cfg->kernel_size; ++kw) {
+                        Serial.printf("%d ", weights[oc * cfg->input_channels * cfg->kernel_size * cfg->kernel_size +
+                                                        ic * cfg->kernel_size * cfg->kernel_size +
+                                                        kh * cfg->kernel_size + kw]);
+                    }
+                    Serial.println();
+                }
+            }
+            // corresponding output value for debug
+            Serial.printf("Output value for output channel %d: %d\n", oc, output[oc * out_h * out_w + 0 * out_w + 0]);
+            // Serial.printf("Output channel %d: ", oc); // print channel 1
+            
+            Serial.println();
+        }
+#endif
 
     }
 }
@@ -67,8 +111,8 @@ void native_conv2d(const uint8_t *input, const int8_t *weights, const int32_t *b
 void _im2col_conv2d(const uint8_t *input, std::vector<q15_t> &col_buffer, const LayerConfig *cfg, const QuantParams *qp,
                     const uint8_t in_h, const uint8_t in_w) {
     // const int in_h = 4, in_w = 4;
-    const int out_h = (in_h + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
-    const int out_w = (in_w + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+    const int out_h = (in_h - cfg->kernel_size) / cfg->stride + 1;
+    const int out_w = (in_w - cfg->kernel_size) / cfg->stride + 1;
 
     const int col_rows = cfg->input_channels * cfg->kernel_size * cfg->kernel_size;
     const int col_cols = out_h * out_w;
@@ -81,8 +125,10 @@ void _im2col_conv2d(const uint8_t *input, std::vector<q15_t> &col_buffer, const 
             for (size_t ic = 0; ic < cfg->input_channels; ++ic) {
                 for (size_t kh = 0; kh < cfg->kernel_size; ++kh) {
                     for (size_t kw = 0; kw < cfg->kernel_size; ++kw) {
-                        int in_y = oh * cfg->stride - cfg->padding + kh;
-                        int in_x = ow * cfg->stride - cfg->padding + kw;
+                        // int in_y = oh * cfg->stride - cfg->padding + kh;
+                        // int in_x = ow * cfg->stride - cfg->padding + kw;
+                        int in_y = oh * cfg->stride + kh;
+                        int in_x = ow * cfg->stride + kw;
                         int32_t input_val = 0;
                         if (in_y >= 0 && in_y < in_h && in_x >= 0 && in_x < in_w) {
                             input_val = (int32_t) input[ic * in_h * in_w + in_y * in_w + in_x] - qp->input_zero_point;
@@ -113,8 +159,8 @@ void _gemm(q15_t *col_buffer, q15_t *weight_buffer,
             const int32_t *bias, uint8_t *output, const LayerConfig *cfg, const QuantParams *qp,
             const uint8_t in_h, const uint8_t in_w) {
     // const int in_h = 4, in_w = 4;
-    const int out_h = (in_h + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
-    const int out_w = (in_w + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+    const int out_h = (in_h - cfg->kernel_size) / cfg->stride + 1;
+    const int out_w = (in_w - cfg->kernel_size) / cfg->stride + 1;
 
     const int col_rows = cfg->input_channels * cfg->kernel_size * cfg->kernel_size;
     const int col_cols = out_h * out_w;
@@ -141,8 +187,8 @@ void im2col_conv2d(const uint8_t *input, const int8_t *weights, const int32_t *b
                     uint8_t *output, const LayerConfig *cfg, const QuantParams *qp,
                     const uint8_t in_h, const uint8_t in_w) {
     // const int in_h = 4, in_w = 4;
-    const int out_h = (in_h + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
-    const int out_w = (in_w + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+    const int out_h = (in_h - cfg->kernel_size) / cfg->stride + 1;
+    const int out_w = (in_w - cfg->kernel_size) / cfg->stride + 1;
 
     const int col_rows = cfg->input_channels * cfg->kernel_size * cfg->kernel_size;
     const int col_cols = out_h * out_w;
@@ -166,8 +212,12 @@ void depthwise_conv2d(const uint8_t *input, const int8_t *weights, const int32_t
                     const uint8_t in_h, const uint8_t in_w) {
     assert(cfg->input_channels == cfg->output_channels);
 
-    const int out_h = (in_h + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
-    const int out_w = (in_w + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+    // const int out_h = (in_h + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+    // const int out_w = (in_w + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+
+    const int out_h = (in_h - cfg->kernel_size) / cfg->stride + 1;
+    const int out_w = (in_w - cfg->kernel_size) / cfg->stride + 1;
+
 
     for (size_t oc = 0; oc < cfg->output_channels; ++oc) {
         int32_t bias_val = bias[oc];
@@ -179,8 +229,11 @@ void depthwise_conv2d(const uint8_t *input, const int8_t *weights, const int32_t
             for (size_t ow = 0; ow < out_w; ++ow) {
                 int32_t acc = bias_val;
 
-                int start_y = oh * cfg->stride - cfg->padding; // input y coordinate corresponding to output (oh, ow)
-                int start_x = ow * cfg->stride - cfg->padding; // input x coordinate corresponding to output (oh, ow)
+                // int start_y = oh * cfg->stride - cfg->padding; // input y coordinate corresponding to output (oh, ow)
+                // int start_x = ow * cfg->stride - cfg->padding; // input x coordinate corresponding to output (oh, ow)
+
+                int start_y = oh * cfg->stride; // input y coordinate corresponding to output (oh, ow)
+                int start_x = ow * cfg->stride; // input x coordinate corresponding to output (oh, ow)
 
                 for (size_t kh = 0; kh < cfg->kernel_size; ++kh) {
                     for (size_t kw = 0; kw < cfg->kernel_size; ++kw) {

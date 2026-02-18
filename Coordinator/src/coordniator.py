@@ -205,6 +205,11 @@ class Coordinator:
             in_end_y = (end_row - 1) * layer.stride + layer.kernel_size
             input_patch = padded[:, in_start_y:in_end_y, :]
 
+            # log input_patch for debug
+            # Check finished; TODO the worker id doesn't match the actual workerId in the worker side
+            # if self.current_layer_idx == 0:
+            #     logger.debug(f"[Coordinator]: Input patch for worker {worker.worker_id} (shape {input_patch.shape}):\n{input_patch[:, :1, :100]}\n")
+            
             task_msg = TaskMessage(
                 layer_type=layer.type,
                 layer_idx=self.current_layer_idx,
@@ -232,6 +237,14 @@ class Coordinator:
         await asyncio.gather(*[t[3] for t in tasks])
         output_shape = (layer.out_channels, H_out, W_out)
         self.feature_map = await self._collect_results(tasks, output_shape)
+        # for debug usage
+        if self.current_layer_idx == 0:
+            logger.debug(f"[Coordinator]: Completed layer {layer.name}, output feature map shape: {self.feature_map.shape}")
+            # hex_str = np.array2string(
+            #     self.feature_map[1, :, :], 
+            #     formatter={'int': lambda x: f'0x{x:02X}'}
+            # )
+            logger.debug(f"[Coordinator]: Sample output hex values:\n{self.feature_map[1, 110:, :]}\n")
 
     async def _distribute_fc(self, layer: LayerConfig, quant_params: QuantParams):
         """Split the feature map by output classes"""
@@ -305,7 +318,9 @@ class Coordinator:
 
     async def _send_task_to_worker(self, worker: WorkerInfo, task_msg: TaskMessage, input_patch: np.ndarray):
         worker.state = WorkerState.BUSY
-        await self.worker_manager.send_message(worker, MessageType.TASK, task_msg.pack() + input_patch.tobytes())
+        # Ensure C-contiguous layout before serializing: slicing along axis-1 (e.g. padded[:, a:b, :])
+        input_bytes = np.ascontiguousarray(input_patch).tobytes()
+        await self.worker_manager.send_message(worker, MessageType.TASK, task_msg.pack() + input_bytes)
         logger.debug(f"[Coordinator]: Sent task for layer {self.current_layer_idx} to worker {worker.worker_id}, waiting for result...")
 
     async def _collect_results(self, tasks: list[asyncio.Task], output_shape: tuple) -> np.ndarray:

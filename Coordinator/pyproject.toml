@@ -1,7 +1,7 @@
 [project]
 name = "coordinator"
 version = "0.1.0"
-description = "Add your description here"
+description = "A distributed inference coordinator for managing worker nodes and orchestrating inference tasks."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -9,4 +9,26 @@ dependencies = [
     "dataclasses>=0.8",
     "numpy>=2.2.6",
     "pillow>=12.1.1",
+    "torch==2.8.*",
+    "torchvision==0.23.*",
 ]
+
+[tool.uv.sources]
+# Install PyTorch with CUDA support on Linux/Windows (CUDA doesn't exist for Mac).
+# NOTE: We must explicitly request them as `dependencies` above. These improved
+# versions will not be selected if they're only third-party dependencies.
+torch = [
+  { index = "pytorch-cuda", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cuda", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+# Use PyTorch built for NVIDIA Toolkit version 12.8.
+# Available versions: https://pytorch.org/get-started/locally/
+url = "https://download.pytorch.org/whl/cu128"
+# Only use this index when explicitly requested by `tool.uv.sources`.
+explicit = true

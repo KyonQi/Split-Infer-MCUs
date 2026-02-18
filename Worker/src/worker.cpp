@@ -187,8 +187,7 @@ void Worker::HandleReceivingTask() {
 // TODO need further developments
 void Worker::HandleComputing() {
     Serial.printf("Worker %d processing task %d...\n", worker_id_, static_cast<uint8_t>(current_task_.layer_type));
-    // uint32_t start_time = micros();
-    int layer_idx = current_task_.layer_idx; // TODO need to get from task payload
+    int layer_idx = current_task_.layer_idx;
     bool success = false;
     uint8_t *input = input_buffer_;
     const int8_t *weights = model_weights[layer_idx].weights;

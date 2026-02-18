@@ -2,6 +2,8 @@ import asyncio
 import contextlib
 import logging
 import argparse
+import torch
+from torchvision import transforms
 import numpy as np
 from pathlib import Path
 from PIL import Image
@@ -13,6 +15,17 @@ logging.basicConfig(filename='./coordinator.log',
                     format='[%(asctime)s] %(name)s - %(levelname)s - [%(filename)s:%(lineno)d]: %(message)s')
 logging.getLogger().setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+def prepocess_image(image_path: str) -> np.ndarray:
+    prepocess = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    img = Image.open(image_path).convert("RGB")
+    input_tensor: torch.Tensor = prepocess(img)
+    return input_tensor.numpy()
 
 async def wait_for_workers(coord: Coordinator, num_workers: int):
     while len(coord.worker_manager.workers.values()) < num_workers:
@@ -27,10 +40,9 @@ async def main(workers: int):
     await wait_for_workers(coord, workers) # block until all workes have connected
     try:
         # Load and prepare input data (example)
-        # input_image_path = Path("./data/panda.jpg")
-        # input_image = Image.open(input_image_path).convert("RGB")
-        # input_data = np.array(input_image).transpose(2, 0, 1)
-        input_image = np.random.rand(3, 224, 224).astype(np.float32)
+        input_image_path = Path("./data/panda.jpg")
+        input_image = prepocess_image(str(input_image_path))
+        # input_image = np.random.rand(3, 224, 224).astype(np.float32)
         output = await coord.execute_inference(input_image)
         logger.debug(f"Inference output: {output}")
     finally:
