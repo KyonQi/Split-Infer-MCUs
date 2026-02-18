@@ -1,4 +1,4 @@
-#include "conv2d.h"
+#include "conv/conv2d.h"
 
 #include <arm_math.h>
 #include <memory>

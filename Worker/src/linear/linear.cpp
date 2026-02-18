@@ -1,4 +1,4 @@
-#include "linear.h"
+#include "linear/linear.h"
 
 #include <arm_math.h>
 #include "weights.h"

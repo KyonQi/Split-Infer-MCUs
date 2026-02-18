@@ -3,8 +3,8 @@
 #include "weights.h"
 #include "layer_config.h"
 #include "quant_params.h"
-#include "conv2d.h"
-#include "linear.h"
+#include "conv/conv2d.h"
+#include "linear/linear.h"
 
 uint8_t Worker::input_buffer_[350 * 1024];  // RAM1: 350KB
 DMAMEM uint8_t Worker::output_buffer_[350 * 1024];  // RAM2: 350KB
@@ -136,7 +136,9 @@ void Worker::SendRegistration() {
 
 void Worker::HandleIdle() {
     // check if there is a new task
+#ifndef DEBUG
     Serial.printf("Worker %d idle, waiting for tasks...\n", worker_id_);
+#endif
     if (client_.available() >= sizeof(MessageHeader)) {
         MessageHeader header;
         Read((uint8_t *)&header, sizeof(header)); // TODO notice we need nonblocking way here; also error handling maybe
@@ -155,7 +157,6 @@ void Worker::HandleIdle() {
             state_ = WorkerState::DISCONNECTED;
             return;
         }
-        // TODO maybe adds shutdown message here
     }
 }
 
@@ -170,6 +171,16 @@ void Worker::HandleReceivingTask() {
         return;
     }
     Read(input_buffer_, total_data_size);
+
+#ifdef DEBUG
+    // print the received input data in hex for debug
+    Serial.printf("Received input data (hex): ");
+    for (size_t i = 0; i < total_data_size && i < 64; i++) { // only print the first 64 bytes for debug
+        Serial.printf("%02X ", input_buffer_[i]);
+    }
+    Serial.println();
+#endif
+
     state_ = WorkerState::COMPUTING;
 }
 
@@ -219,7 +230,7 @@ void Worker::HandleComputing() {
 void Worker::HandleSendingResult() {
     Serial.printf("Worker %d sending result...\n", worker_id_);
     MessageHeader header;
-    init_header(header, MessageType::RESULT, worker_id_, sizeof(ResultPayload));
+    init_header(header, MessageType::RESULT, worker_id_, sizeof(ResultMessage));
 
     Send((const uint8_t *)&header, sizeof(header));
     Send((const uint8_t *)&current_result_, sizeof(current_result_));
@@ -231,8 +242,8 @@ void Worker::HandleSendingResult() {
     }
     Serial.println();
 
-    // 3. 分块发送大数据
-    const size_t CHUNK_SIZE = 1024;  // 每次发 1KB，适配嵌入式 TCP 缓冲区
+    // send big data in chunks
+    const size_t CHUNK_SIZE = 1024;  // 1KB per chunk, can be tuned based on performance testing
     size_t total = current_result_.output_size;
     size_t offset = 0;
     
@@ -270,20 +281,34 @@ void Worker::Send(const uint8_t *buffer, size_t size) {
         if (n > 0) {
             bytes_sent += n;
         } else if (n == 0) {
-            // 缓冲区暂时满了，yield 让出 CPU，等待缓冲区腾出空间
-            // 不要 break！
+            // buffer is full, wait for it to drain before sending more
             if (!client_.connected()) {
                 Serial.println("Connection lost while sending");
                 break;
             }
-            delay(1);  // 或者 yield(); 取决于你的 RTOS/平台
+            delay(1);
         } else {
-            // n < 0 才是真正的错误
+            // n < 0 means an error occurred
             Serial.println("Error sending data to server");
             break;
         }
     }
-    // 不要在这里 flush()，或者只在最后一帧结束后 flush 一次
+}
+
+// TODO blocking read, how to unblocking?
+void Worker::Read(uint8_t *buffer, size_t size) {
+    size_t bytes_read = 0;
+    while (bytes_read < size) {
+        if (client_.available()) {
+            int ret = client_.read(buffer + bytes_read, size - bytes_read);
+            if (ret > 0) {
+                bytes_read += ret;
+            } else {
+                Serial.println("Error reading from server");
+                break;
+            }
+        }
+    }
 }
 
 // void Worker::Send(const uint8_t *buffer, size_t size) {
@@ -302,22 +327,4 @@ void Worker::Send(const uint8_t *buffer, size_t size) {
 //     // }
 //     client_.flush();
 // }
-
-// TODO blocking read, how to unblocking?
-void Worker::Read(uint8_t *buffer, size_t size) {
-    size_t bytes_read = 0;
-    while (bytes_read < size) {
-        if (client_.available()) {
-            int ret = client_.read(buffer + bytes_read, size - bytes_read);
-            if (ret > 0) {
-                bytes_read += ret;
-            } else {
-                Serial.println("Error reading from server");
-                break;
-            }
-        }
-    }
-}
-
-
 

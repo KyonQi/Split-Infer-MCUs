@@ -37,8 +37,7 @@ private:
     void HandleSendingResult();
 
 private:
-    void ConnectToServer();
-    void SendRegistration(); // maybe no need
+    void SendRegistration();
     void SendError(ErrorCode code, const char *description);
     void Send(const uint8_t *buffer, size_t size);
     void Read(uint8_t *buffer, size_t size);
@@ -50,8 +49,8 @@ private:
     IPAddress svr_ip_;
     uint16_t svr_port_;
 
-    TaskPayload current_task_;
-    ResultPayload current_result_;
+    TaskMessage current_task_;
+    ResultMessage current_result_;
     
     bool is_connected_;
 

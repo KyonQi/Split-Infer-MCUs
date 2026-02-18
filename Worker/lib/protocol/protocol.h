@@ -49,7 +49,7 @@ struct RegisterAckMessage {
     uint8_t assigned_id; // it should be the same as worker_id in header, but server can reassign if needed
 } __attribute__((packed)); // TODO need further check the attribute; 1 byte for payload
 
-struct TaskPayload {
+struct TaskMessage {
     LayerType layer_type;
     uint32_t layer_idx;
 
@@ -68,13 +68,12 @@ struct TaskPayload {
     uint32_t input_size; // in bytes    
 } __attribute__((packed)); // TODO need further check the attribute; 29 bytes for payload
 
-struct ResultPayload {
+struct ResultMessage {
     uint32_t compute_time_us;
     uint32_t output_size; // in bytes
     // maybe performance records here
 } __attribute__((packed)); // TODO need further check the attribute; 8 bytes for payload
 
-// TODO need to rename it to ErrorPayload
 struct ErrorMessage {
     uint8_t error_code;
     char description[63];
