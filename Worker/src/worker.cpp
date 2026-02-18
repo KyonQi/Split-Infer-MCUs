@@ -3,8 +3,8 @@
 #include "weights.h"
 #include "layer_config.h"
 #include "quant_params.h"
-#include "conv/conv2d.h"
-#include "linear/linear.h"
+#include "conv2d.h"
+#include "linear.h"
 
 uint8_t Worker::input_buffer_[350 * 1024];  // RAM1: 350KB
 DMAMEM uint8_t Worker::output_buffer_[350 * 1024];  // RAM2: 350KB

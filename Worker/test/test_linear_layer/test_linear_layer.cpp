@@ -2,8 +2,8 @@
 #include <arm_math.h>
 #include <memory>
 
-#include "linear/linear.h"
-#include "linear/linear_test_data.h"
+#include "linear.h"
+#include "linear_test_data.h"
 #include "weights.h"
 #include "layer_config.h"
 #include "quant_params.h"

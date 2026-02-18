@@ -2,8 +2,8 @@
 #include <arm_math.h>
 #include <memory>
 
-#include "conv/conv2d.h"
-#include "conv/conv2d_test_data.h"
+#include "conv2d.h"
+#include "conv2d_test_data.h"
 #include "weights.h"
 #include "layer_config.h"
 #include "quant_params.h"
