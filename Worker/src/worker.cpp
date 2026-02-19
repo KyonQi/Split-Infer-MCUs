@@ -205,6 +205,8 @@ void Worker::HandleComputing() {
             conv2d::depthwise_conv2d(input, weights, bias, output, 
                                     &model_layer_config[layer_idx], &model_quant_params[layer_idx],
                                     current_task_.in_h, current_task_.in_w);
+            success = true;
+            break;
         case LayerType::FC:
             linear::native_linear(input, weights, bias, output,
                                     &model_layer_config[layer_idx], &model_quant_params[layer_idx]);
@@ -213,6 +215,7 @@ void Worker::HandleComputing() {
         default:
             break;
     }
+    // TODO check if we need ReLU6 here; QuantWorker doesn't have it
     uint32_t task_elapsed_time = micros() - task_start_time;
     if (!success) {
         Serial.println("Invalid layer type in task");
