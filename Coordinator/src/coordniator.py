@@ -128,7 +128,6 @@ class Coordinator:
     async def execute_inference(self, input_data: np.ndarray) -> np.ndarray:
         logger.info(f"[Coordinator]: Starting inference execution for input shape {input_data.shape}")
 
-        # TODO need further dev
         self._parse_layer_configs() # parse the layer config and quant params from json file, and fill in the layer_config_list and quant_params_list
         self.feature_map = self._quantize_input(input_data, self.quant_params_list[0]) # quantize the input data to uint8, and fill in the feature_map
         self.residual_buffers.clear()
@@ -211,11 +210,6 @@ class Coordinator:
             in_end_y = (end_row - 1) * layer.stride + layer.kernel_size
             input_patch = padded[:, in_start_y:in_end_y, :]
 
-            # log input_patch for debug
-            # Check finished; TODO the worker id doesn't match the actual workerId in the worker side
-            # if self.current_layer_idx == 0:
-            #     logger.debug(f"[Coordinator]: Input patch for worker {worker.worker_id} (shape {input_patch.shape}):\n{input_patch[:, :1, :100]}\n")
-            
             task_msg = TaskMessage(
                 layer_type=layer.type,
                 layer_idx=self.current_layer_idx,
@@ -243,16 +237,6 @@ class Coordinator:
         await asyncio.gather(*[t[3] for t in tasks])
         output_shape = (layer.out_channels, H_out, W_out)
         self.feature_map = await self._collect_results(tasks, output_shape)
-        # for debug usage
-        if self.current_layer_idx == 51:
-            logger.debug(f"[Coordinator]: Completed layer {layer.name}, output feature map shape: {self.feature_map.shape}")
-            # hex_str = np.array2string(
-            #     self.feature_map[1, :, :], 
-            #     formatter={'int': lambda x: f'0x{x:02X}'}
-            # )
-
-            # logger.debug(f"[Coordinator]: Input for this layer is:\n{padded[1, :1, :]}\n")
-            logger.debug(f"[Coordinator]: Sample output hex values:\n{self.feature_map[1, :2, :]}\n")
 
     async def _distribute_fc(self, layer: LayerConfig, quant_params: QuantParams):
         """Split the feature map by output classes"""
@@ -262,7 +246,7 @@ class Coordinator:
         num_workers = len(available_workers) # TODO maybe get idle workers
         classes_per_worker = int(np.ceil(total_classes / num_workers))
 
-        logger.info(f"[Coordinator]: Distributing FC layer {layer.name} with {total_classes} classes across {num_workers} workers")
+        logger.debug(f"[Coordinator]: Distributing FC layer {layer.name} with {total_classes} classes across {num_workers} workers")
         
         tasks = []
         for i, worker in enumerate(available_workers):
@@ -346,7 +330,7 @@ class Coordinator:
     async def _collect_results(self, tasks: list[asyncio.Task], output_shape: tuple) -> np.ndarray:
         output = np.zeros(output_shape, dtype=np.uint8)
         num_workers = len(tasks)
-        logger.info(f"[Coordinator]: Collecting results from {num_workers} workers for layer {self.current_layer_idx}")
+        logger.debug(f"[Coordinator]: Collecting results from {num_workers} workers for layer {self.current_layer_idx}")
         
         receive_tasks = []
         for worker, start_idx, end_idx, _ in tasks:
@@ -438,7 +422,7 @@ class Coordinator:
             quant_params_dict = layer_data["quant_params"]
 
             layer_type = LayerType(layer_config_dict["type"])
-            # TODO need change
+
             cfg = LayerConfig(
                 name=layer_config_dict["name"],
                 type=layer_type,

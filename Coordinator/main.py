@@ -10,12 +10,22 @@ from pathlib import Path
 from PIL import Image
 from src.coordniator import Coordinator
 
-logging.basicConfig(filename='./coordinator.log', 
-                    filemode='w',
-                    level=logging.DEBUG, 
-                    format='[%(asctime)s] %(name)s - %(levelname)s - [%(filename)s:%(lineno)d]: %(message)s')
-logging.getLogger().setLevel(logging.DEBUG)
+# logging.basicConfig(filename='./coordinator.log', 
+#                     filemode='w',
+#                     level=logging.DEBUG, 
+#                     format='[%(asctime)s] %(name)s - %(levelname)s - [%(filename)s:%(lineno)d]: %(message)s')
+# logging.getLogger().setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+def setup_logging(log_level: str):
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f"Invalid log level: {log_level}")
+
+    logging.basicConfig(filename='./coordinator.log', 
+                    filemode='w',
+                    level=numeric_level, 
+                    format='[%(asctime)s] %(name)s - %(levelname)s - [%(filename)s:%(lineno)d]: %(message)s')
 
 def prepocess_image(image_path: str) -> np.ndarray:
     prepocess = transforms.Compose([
@@ -54,7 +64,7 @@ async def main(workers: int):
         # Find the top 5 predictions
         top_5_indices = np.argsort(output)[::-1][:5]
         for i, idx in enumerate(top_5_indices):
-            logger.debug(f"Top {i+1}: {labels[idx]} (score: {output[idx]:.4f})")
+            logger.info(f"Top {i+1}: {labels[idx]} (score: {output[idx]:.4f})")
         
     finally:
         # send shutdown message to all workers so they can clean up and exit gracefully
@@ -68,8 +78,11 @@ async def main(workers: int):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Coordinator for distributed DNN inference")
-    parser.add_argument('--workers', type=int, default=2, help='Number of workers')
+    parser.add_argument('--workers', type=int, default=4, help='Number of workers')
+    parser.add_argument('--log-level', type=str, default='INFO', help='Logging level (DEBUG, INFO, WARNING, ERROR)')
     args = parser.parse_args()
+
+    setup_logging(args.log_level)
     
     try:
         asyncio.run(main(args.workers))

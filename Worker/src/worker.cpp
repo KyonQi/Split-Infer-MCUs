@@ -14,7 +14,11 @@ Worker::Worker(uint8_t worker_id, IPAddress svr_ip, uint16_t svr_port)
     state_ = WorkerState::DISCONNECTED;
 }
 
-Worker::~Worker() {}
+Worker::~Worker() {
+    if (client_.connected()) {
+        client_.stop();
+    }
+}
 
 void Worker::Begin() {
     // allocate static IP
@@ -136,7 +140,7 @@ void Worker::SendRegistration() {
 
 void Worker::HandleIdle() {
     // check if there is a new task
-#ifndef DEBUG
+#ifdef DEBUG
     Serial.printf("Worker %d idle, waiting for tasks...\n", worker_id_);
 #endif
     if (client_.available() >= sizeof(MessageHeader)) {
@@ -153,7 +157,6 @@ void Worker::HandleIdle() {
         if (header.type == MessageType::SHUTDOWN) {
             client_.stop();
             is_connected_ = false;
-            // Serial.printf("Worker %d received shutdown message, disconnecting...\n", worker_id_);
             state_ = WorkerState::DISCONNECTED;
             return;
         }
@@ -161,7 +164,9 @@ void Worker::HandleIdle() {
 }
 
 void Worker::HandleReceivingTask() {
+#ifdef DEBUG
     Serial.printf("Worker %d receiving task...\n", worker_id_);
+#endif
     Read((uint8_t *)&current_task_, sizeof(current_task_)); // TODO error handling
     uint32_t total_data_size = current_task_.input_size;
     if (total_data_size > sizeof(input_buffer_)) {
@@ -171,22 +176,14 @@ void Worker::HandleReceivingTask() {
         return;
     }
     Read(input_buffer_, total_data_size);
-
-#ifdef DEBUG
-    // print the received input data in hex for debug
-    Serial.printf("Received input data (hex): ");
-    for (size_t i = 0; i < total_data_size && i < 64; i++) { // only print the first 64 bytes for debug
-        Serial.printf("%02X ", input_buffer_[i]);
-    }
-    Serial.println();
-#endif
-
     state_ = WorkerState::COMPUTING;
 }
 
 // TODO need further developments
 void Worker::HandleComputing() {
+#ifdef DEBUG
     Serial.printf("Worker %d processing task %d...\n", worker_id_, static_cast<uint8_t>(current_task_.layer_type));
+#endif
     int layer_idx = current_task_.layer_idx;
     bool success = false;
     uint8_t *input = input_buffer_;
@@ -230,19 +227,14 @@ void Worker::HandleComputing() {
 }
 
 void Worker::HandleSendingResult() {
+#ifdef DEBUG
     Serial.printf("Worker %d sending result...\n", worker_id_);
+#endif
     MessageHeader header;
     init_header(header, MessageType::RESULT, worker_id_, sizeof(ResultMessage));
 
     Send((const uint8_t *)&header, sizeof(header));
     Send((const uint8_t *)&current_result_, sizeof(current_result_));
-
-    // debug printf the output data in hex
-    Serial.printf("Output data (hex): ");
-    for (size_t i = 0; i < current_result_.output_size && i < 64; i++) { // only print the first 64 bytes for debug
-        Serial.printf("%02X ", output_buffer_[i]);
-    }
-    Serial.println();
 
     // send big data in chunks
     const size_t CHUNK_SIZE = 1024;  // 1KB per chunk, can be tuned based on performance testing
@@ -257,8 +249,9 @@ void Worker::HandleSendingResult() {
 
     // Send(output_buffer_, current_result_.output_size);
     client_.flush();
+#ifdef DEBUG
     Serial.printf("Worker %d finish sending...\n", worker_id_);
-    
+#endif
     state_ = WorkerState::IDLE;
 }
 
@@ -272,7 +265,9 @@ void Worker::SendError(ErrorCode code, const char *description) {
     err_msg.error_code = static_cast<uint8_t>(code);
     Send((const uint8_t *)&header, sizeof(header));
     Send((const uint8_t *)&err_msg, sizeof(err_msg));
+#ifdef DEBUG
     Serial.printf("Worker %d sent error message: %s\n", worker_id_, err_msg.description);
+#endif
 }
 
 

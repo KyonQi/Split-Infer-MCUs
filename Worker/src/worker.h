@@ -9,11 +9,9 @@
 class Worker final {
 public:
     Worker(uint8_t worker_id, IPAddress svr_ip, uint16_t svr_port);
-
     ~Worker();
 
     void Begin(); // simiar to setup()
-
     void Loop();
 
 private:
