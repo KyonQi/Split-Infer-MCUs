@@ -58,6 +58,7 @@ class Coordinator:
 
         # stats
         self.stats: list[dict] = []
+        self.current_layer_stats: dict = {}
 
     async def start(self):
         self.running = True
@@ -137,20 +138,44 @@ class Coordinator:
             self.current_layer_idx = layer_idx
             logger.debug(f"[Coordinator]: Executing layer {layer_idx} - {layer.name} ({LayerType(layer.type)})")
             
+            # init current layer stats
+            self.current_layer_stats = {
+                "layer_idx": layer_idx,
+                "layer_name": layer.name,
+                "layer_type": LayerType(layer.type).name,
+                "total_time_ms": 0.0,
+                "avg_compute_ms": 0.0,
+                "avg_comm_ms": 0.0,
+                "workers": {}, #
+            }
+
             layer_start = time.perf_counter()
             await self._run_layer(layer, quant_params)
             layer_time = time.perf_counter() - layer_start
-            self.stats.append({
-                'layer_idx': layer_idx,
-                'layer_name': layer.name,
-                'layer_type': layer.type,
-                'compute_time': layer_time,
-            })
-
+                        
             logger.debug(f"[Coordinator]: Layer {layer_idx} completed in {layer_time:.4f} seconds, output shape {self.feature_map.shape}")
         
+            # current layer stats
+            self.current_layer_stats["total_time_ms"] = layer_time * 1000
+            worker_stats = list(self.current_layer_stats["workers"].values())
+            if worker_stats:
+                self.current_layer_stats["avg_compute_ms"] = float(np.mean([
+                    ws["mcu_compute_ms"] for ws in worker_stats
+                ]))
+                # self.current_layer_stats["avg_comm_ms"] = float(np.mean([
+                #     ws["send_time_ms"] + ws["recv_time_ms"] for ws in worker_stats
+                # ])) # it's not reasonable, since we're using asycnio, read/write only relates to the data buffer
+            self.stats.append(self.current_layer_stats) # store the last layer stats
+            logger.debug(
+                f"[Coordinator]: Layer {layer_idx} done — "
+                f"total={self.current_layer_stats['total_time_ms']:.2f}ms  "
+                f"compute={self.current_layer_stats['avg_compute_ms']:.2f}ms  "
+                # f"comm={self.current_layer_stats['avg_comm_ms']:.2f}ms"
+            )
+
         total_time = time.time() - start_time
         logger.info(f"[Coordinator]: Inference execution completed in {total_time:.4f} seconds")
+        self.print_stats()
 
         return self.feature_map
 
@@ -303,7 +328,6 @@ class Coordinator:
         curr_f = (self.feature_map.astype(np.float32) - curr_zero_point) * curr_scale
         
         sum_f = curr_f + res_f
-        # TODO need to chaneg to get the real target scale and zero point
         target_s = self.quant_params_list[self.current_layer_idx].s_residual_out
         target_z = self.quant_params_list[self.current_layer_idx].z_residual_out
         self.feature_map = np.clip(np.round(sum_f / target_s + target_z), 0, 255).astype(np.uint8)
@@ -324,7 +348,18 @@ class Coordinator:
         worker.state = WorkerState.BUSY
         # Ensure C-contiguous layout before serializing: slicing along axis-1 (e.g. padded[:, a:b, :])
         input_bytes = np.ascontiguousarray(input_patch).tobytes()
+
+        send_start = time.perf_counter()
         await self.worker_manager.send_message(worker, MessageType.TASK, task_msg.pack() + input_bytes)
+        send_time = time.perf_counter() - send_start
+
+        # init the worker's stats
+        self.current_layer_stats["workers"][worker.worker_id] = {
+            "send_time_ms": send_time * 1000,
+            "recv_time_ms": 0.0,
+            "mcu_compute_ms": 0.0,
+        }
+
         logger.debug(f"[Coordinator]: Sent task for layer {self.current_layer_idx} to worker {worker.worker_id}, waiting for result...")
 
     async def _collect_results(self, tasks: list[asyncio.Task], output_shape: tuple) -> np.ndarray:
@@ -366,7 +401,10 @@ class Coordinator:
             
             # read exact output data
             # output_data = await worker.reader.readexactly(result_msg.output_size)
+            recv_start = time.perf_counter()
             output_data = await asyncio.wait_for(worker.reader.readexactly(result_msg.output_size), timeout=10)
+            recv_time = time.perf_counter() - recv_start
+
             logger.debug(f"[Coordinator]: Received result header from worker {worker.worker_id} with output size {result_msg.output_size} bytes")
             
             # parse output data and write to the correct position in the output feature map
@@ -387,6 +425,10 @@ class Coordinator:
             # update stats
             # self.stats.total_comm_volume += result_msg.output_size
             # self.stats.total_compute_time += result_msg.compute_time_us / 1e6
+            if worker.worker_id in self.current_layer_stats["workers"]:
+                ws = self.current_layer_stats["workers"][worker.worker_id]
+                ws["mcu_compute_ms"] = result_msg.compute_time_us / 1000
+                ws["recv_time_ms"] = recv_time * 1000
             
             # mark worker idle again
             # worker.state = WorkerState.IDLE
@@ -461,3 +503,13 @@ class Coordinator:
         z_in = quant_params.z_in
         quantized = np.clip(np.round(input_data / s_in + z_in), 0, 255).astype(np.uint8)
         return quantized
+    
+    def print_stats(self):
+        logger.info(f"[Coordinator]: Inference execution stats:")
+        for s in self.stats:
+            logger.info(
+                f"Layer {s['layer_idx']:>3} [{s['layer_type']:>8}] {s['layer_name']}: "
+                f"total={s['total_time_ms']:.2f}ms  "
+                f"compute={s.get('avg_compute_ms', 0):.2f}ms  "
+                # f"comm={s.get('avg_comm_ms', 0):.2f}ms"
+            )
