@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 import time
 import json
 import numpy as np
@@ -37,7 +38,9 @@ class QuantParams:
     z_w: Union[float, np.ndarray]
     s_out: float
     z_out: int
-    m: Union[float, np.ndarray] #float # precomputing multiplier for requantization m = (s_in * s_w) / s_out    
+    m: Union[float, np.ndarray] #float # precomputing multiplier for requantization m = (s_in * s_w) / s_out
+    s_residual_out: Optional[float] = None
+    z_residual_out: Optional[int] = None        
 
 class Coordinator:
     def __init__(self, host: str = '192, 168, 1, 10', port: int = 54321):
@@ -97,6 +100,7 @@ class Coordinator:
                 self.worker_manager.remove_worker(worker)   
                 return
             reg_msg = RegisterMessage.unpack(payload)
+            worker.worker_id = header.worker_id # notice here we change to the real hardware assigned worker id after registration
             worker.clock_mhz = reg_msg.clock_mhz
             logger.info(f"[Coordinator]: Worker {worker.worker_id} registered with clock {worker.clock_mhz} MHz")
 
@@ -161,6 +165,8 @@ class Coordinator:
             gap_output = np.mean(self.feature_map, axis=(1, 2))
             self.feature_map = np.round(gap_output).astype(np.uint8)
             logger.debug(f"[Coordinator]: Applied GAP for FC layer, new shape {self.feature_map.shape}")
+            with np.printoptions(threshold=sys.maxsize, linewidth=150):
+                logger.debug(f"[Coordinator]: Sample GAP output values:\n{self.feature_map}\n")
 
         if layer.type == LayerType.FC:
             await self._distribute_fc(layer, quant_params)
@@ -238,13 +244,15 @@ class Coordinator:
         output_shape = (layer.out_channels, H_out, W_out)
         self.feature_map = await self._collect_results(tasks, output_shape)
         # for debug usage
-        if self.current_layer_idx == 0:
+        if self.current_layer_idx == 51:
             logger.debug(f"[Coordinator]: Completed layer {layer.name}, output feature map shape: {self.feature_map.shape}")
             # hex_str = np.array2string(
             #     self.feature_map[1, :, :], 
             #     formatter={'int': lambda x: f'0x{x:02X}'}
             # )
-            logger.debug(f"[Coordinator]: Sample output hex values:\n{self.feature_map[1, 110:, :]}\n")
+
+            # logger.debug(f"[Coordinator]: Input for this layer is:\n{padded[1, :1, :]}\n")
+            logger.debug(f"[Coordinator]: Sample output hex values:\n{self.feature_map[1, :2, :]}\n")
 
     async def _distribute_fc(self, layer: LayerConfig, quant_params: QuantParams):
         """Split the feature map by output classes"""
@@ -258,7 +266,9 @@ class Coordinator:
         
         tasks = []
         for i, worker in enumerate(available_workers):
-            start_cls = i * classes_per_worker
+            # start_cls = i * classes_per_worker
+            # end_cls = min(start_cls + classes_per_worker, total_classes)
+            start_cls = worker.worker_id * classes_per_worker
             end_cls = min(start_cls + classes_per_worker, total_classes)
             
             if start_cls >= total_classes:
@@ -310,11 +320,21 @@ class Coordinator:
         
         sum_f = curr_f + res_f
         # TODO need to chaneg to get the real target scale and zero point
-        target_s = self.quant_params_list[self.current_layer_idx].s_out
-        target_z = self.quant_params_list[self.current_layer_idx].z_out
+        target_s = self.quant_params_list[self.current_layer_idx].s_residual_out
+        target_z = self.quant_params_list[self.current_layer_idx].z_residual_out
         self.feature_map = np.clip(np.round(sum_f / target_s + target_z), 0, 255).astype(np.uint8)
 
         logger.debug(f"[Coordinator]: Applied residual connection from {residual_from} to current layer {self.current_layer_idx}, feature map updated")
+
+        if self.current_layer_idx == 51:
+            logger.debug(f"[Coordinator]: Completed layer {residual_from}, output feature map shape: {self.feature_map.shape}")
+            # hex_str = np.array2string(
+            #     self.feature_map[1, :, :], 
+            #     formatter={'int': lambda x: f'0x{x:02X}'}
+            # )
+
+            # logger.debug(f"[Coordinator]: Input for this layer is:\n{padded[1, :1, :]}\n")
+            logger.debug(f"[Coordinator]: Sample output hex values:\n{self.feature_map[1, :2, :]}\n")
 
     async def _send_task_to_worker(self, worker: WorkerInfo, task_msg: TaskMessage, input_patch: np.ndarray):
         worker.state = WorkerState.BUSY
@@ -440,7 +460,9 @@ class Coordinator:
                 z_w=np.array(quant_params_dict["z_w"], dtype=np.int32),
                 s_out=float(quant_params_dict["s_out"]),
                 z_out=int(quant_params_dict["z_out"]),
-                m=np.array(quant_params_dict["m"], dtype=np.float32)    
+                m=np.array(quant_params_dict["m"], dtype=np.float32),
+                s_residual_out=float(quant_params_dict["s_residual_out"]) if quant_params_dict["s_residual_out"] is not None else None,
+                z_residual_out=int(quant_params_dict["z_residual_out"]) if quant_params_dict["z_residual_out"] is not None else None
             )
 
             layer_configs.append(cfg)

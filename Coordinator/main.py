@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import logging
 import argparse
 import torch
@@ -27,6 +28,10 @@ def prepocess_image(image_path: str) -> np.ndarray:
     input_tensor: torch.Tensor = prepocess(img)
     return input_tensor.numpy()
 
+def load_imagenet_labels(path: str) -> list[str]:
+    with open(path, 'r') as f:
+        return json.load(f)
+
 async def wait_for_workers(coord: Coordinator, num_workers: int):
     while len(coord.worker_manager.workers.values()) < num_workers:
         await asyncio.sleep(1)
@@ -42,9 +47,15 @@ async def main(workers: int):
         # Load and prepare input data (example)
         input_image_path = Path("./data/panda.jpg")
         input_image = prepocess_image(str(input_image_path))
+        labels = load_imagenet_labels("./data/imagenet_labels.json")
         # input_image = np.random.rand(3, 224, 224).astype(np.float32)
         output = await coord.execute_inference(input_image)
         logger.debug(f"Inference output: {output}")
+        # Find the top 5 predictions
+        top_5_indices = np.argsort(output)[::-1][:5]
+        for i, idx in enumerate(top_5_indices):
+            logger.debug(f"Top {i+1}: {labels[idx]} (score: {output[idx]:.4f})")
+        
     finally:
         # send shutdown message to all workers so they can clean up and exit gracefully
         await coord.shutdown_workers()
