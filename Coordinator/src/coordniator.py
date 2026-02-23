@@ -364,18 +364,18 @@ class Coordinator:
         # Ensure C-contiguous layout before serializing: slicing along axis-1 (e.g. padded[:, a:b, :])
         input_bytes = np.ascontiguousarray(input_patch).tobytes()
 
-        # rANS compress input data before sending
-        original_size = len(input_bytes)
-        compressed_bytes = rans_compress(input_bytes)
-        if len(compressed_bytes) < original_size:
-            # Compression was beneficial — update task_msg.input_size to compressed size
-            task_msg.input_size = len(compressed_bytes)
-            input_bytes = compressed_bytes
-            logger.debug(
-                f"[Coordinator]: Compressed input for worker {worker.worker_id}: "
-                f"{original_size} -> {len(compressed_bytes)} bytes "
-                f"({original_size / len(compressed_bytes):.2f}x)"
-            )
+        # # rANS compress input data before sending
+        # original_size = len(input_bytes)
+        # compressed_bytes = rans_compress(input_bytes)
+        # if len(compressed_bytes) < original_size:
+        #     # Compression was beneficial — update task_msg.input_size to compressed size
+        #     task_msg.input_size = len(compressed_bytes)
+        #     input_bytes = compressed_bytes
+        #     logger.debug(
+        #         f"[Coordinator]: Compressed input for worker {worker.worker_id}: "
+        #         f"{original_size} -> {len(compressed_bytes)} bytes "
+        #         f"({original_size / len(compressed_bytes):.2f}x)"
+        #     )
 
         send_start = time.perf_counter()
         await self.worker_manager.send_message(worker, MessageType.TASK, task_msg.pack() + input_bytes)
@@ -435,17 +435,17 @@ class Coordinator:
 
             logger.debug(f"[Coordinator]: Received result header from worker {worker.worker_id} with output size {result_msg.output_size} bytes")
             
-            # rANS decompression
-            if is_rans_compressed(output_data):
-                decompress_start = time.perf_counter()
-                raw_bytes = rans_decompress(output_data)
-                decompress_time = time.perf_counter() - decompress_start
-                logger.debug(
-                    f"[Coordinator]: Decompressed rANS from worker {worker.worker_id}: "
-                    f"{len(output_data)} -> {len(raw_bytes)} bytes, "
-                    f"decompress time: {decompress_time * 1000:.2f} ms"
-                )
-                output_data = raw_bytes
+            # # rANS decompression
+            # if is_rans_compressed(output_data):
+            #     decompress_start = time.perf_counter()
+            #     raw_bytes = rans_decompress(output_data)
+            #     decompress_time = time.perf_counter() - decompress_start
+            #     logger.debug(
+            #         f"[Coordinator]: Decompressed rANS from worker {worker.worker_id}: "
+            #         f"{len(output_data)} -> {len(raw_bytes)} bytes, "
+            #         f"decompress time: {decompress_time * 1000:.2f} ms"
+            #     )
+            #     output_data = raw_bytes
 
 
             # parse output data and write to the correct position in the output feature map

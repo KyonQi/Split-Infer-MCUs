@@ -245,25 +245,26 @@ void Worker::HandleComputing() {
 
     
     // rANS compression: output_buffer_ → input_buffer_ (cannot compress in-place)
-    uint32_t raw_output_size = current_task_.out_channels * current_task_.out_h * current_task_.out_w;
-    uint32_t compress_start = micros();
-    size_t compress_size = rans::compress(output_buffer_, raw_output_size, input_buffer_, sizeof(input_buffer_));
-    uint32_t compress_time = micros() - compress_start;
-    if (0 == compress_size) {
-        Serial.println("Compression failed");
-        SendError(ErrorCode::ERR_OUT_OF_MEMORY, "Compression failed");
-        state_ = WorkerState::IDLE;
-        return;
-    }
-#ifdef DEBUG
-    Serial.printf("Worker %d finished computing, raw output size: %d bytes, compressed size: %d bytes, compute time: %d us, compression time: %d us\n", 
-        worker_id_, raw_output_size, compress_size, task_elapsed_time, compress_time);
-#endif
+//     uint32_t raw_output_size = current_task_.out_channels * current_task_.out_h * current_task_.out_w;
+//     uint32_t compress_start = micros();
+//     size_t compress_size = rans::compress(output_buffer_, raw_output_size, input_buffer_, sizeof(input_buffer_));
+//     uint32_t compress_time = micros() - compress_start;
+//     if (0 == compress_size) {
+//         Serial.println("Compression failed");
+//         SendError(ErrorCode::ERR_OUT_OF_MEMORY, "Compression failed");
+//         state_ = WorkerState::IDLE;
+//         return;
+//     }
+// #ifdef DEBUG
+//     Serial.printf("Worker %d finished computing, raw output size: %d bytes, compressed size: %d bytes, compute time: %d us, compression time: %d us\n", 
+//         worker_id_, raw_output_size, compress_size, task_elapsed_time, compress_time);
+// #endif
 
 
     current_result_.compute_time_us = task_elapsed_time;
-    current_result_.compress_time_us = compress_time;
-    current_result_.output_size = static_cast<uint32_t>(compress_size);
+    current_result_.compress_time_us = 0;
+    // current_result_.output_size = static_cast<uint32_t>(compress_size);
+    current_result_.output_size = current_task_.out_channels * current_task_.out_h * current_task_.out_w; // TODO need further check if we can directly send raw output without compression
     state_ = WorkerState::SENDING_RESULT;
 }
 
@@ -284,7 +285,8 @@ void Worker::HandleSendingResult() {
     
     while (offset < total) {
         size_t chunk = min(CHUNK_SIZE, total - offset);
-        Send((const uint8_t *)&input_buffer_[offset], chunk);
+        // Send((const uint8_t *)&input_buffer_[offset], chunk);
+        Send((const uint8_t *)&output_buffer_[offset], chunk); // if not compress
         offset += chunk;
     }
 
