@@ -117,18 +117,19 @@ class TaskMessage:
 
 @dataclass
 class ResultMessage:
-    FORMAT = '<II'
+    FORMAT = '<III'
     SIZE = struct.calcsize(FORMAT)
     
     compute_time_us: int
+    compress_time_us: int
     output_size: int # in bytes
 
     @staticmethod
     def unpack(data: bytes) -> 'ResultMessage':
         if len(data) < ResultMessage.SIZE:
             raise ValueError("Insufficient data for ResultMessage")
-        compute_time_us, output_size = struct.unpack(ResultMessage.FORMAT, data[:ResultMessage.SIZE])
-        return ResultMessage(compute_time_us, output_size)
+        compute_time_us, compress_time_us, output_size = struct.unpack(ResultMessage.FORMAT, data[:ResultMessage.SIZE])
+        return ResultMessage(compute_time_us, compress_time_us, output_size)
 
 
 

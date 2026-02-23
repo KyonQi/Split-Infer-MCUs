@@ -5,6 +5,7 @@
 #include "quant_params.h"
 #include "conv/conv2d.h"
 #include "linear/linear.h"
+#include "rans.h"
 
 uint8_t Worker::input_buffer_[350 * 1024];  // RAM1: 350KB
 DMAMEM uint8_t Worker::output_buffer_[350 * 1024];  // RAM2: 350KB
@@ -176,6 +177,27 @@ void Worker::HandleReceivingTask() {
         return;
     }
     Read(input_buffer_, total_data_size);
+
+    // Auto-detect rANS compressed input and decompress
+    if (total_data_size >= sizeof(rans::Header)) {
+        const rans::Header *hdr = reinterpret_cast<const rans::Header *>(input_buffer_);
+        if (hdr->magic == rans::MAGIC) {
+            // Decompress: input_buffer_ → output_buffer_ → input_buffer_
+            size_t decompressed = rans::decompress(input_buffer_, total_data_size,
+                                                   output_buffer_, sizeof(output_buffer_));
+            if (decompressed == 0) {
+                SendError(ErrorCode::ERR_OUT_OF_MEMORY, "Input decompression failed");
+                state_ = WorkerState::IDLE;
+                return;
+            }
+            memcpy(input_buffer_, output_buffer_, decompressed);
+#ifdef DEBUG
+            Serial.printf("Worker %d decompressed input: %u -> %u bytes\n",
+                          worker_id_, total_data_size, (uint32_t)decompressed);
+#endif
+        }
+    }
+
     state_ = WorkerState::COMPUTING;
 }
 
@@ -220,9 +242,28 @@ void Worker::HandleComputing() {
         state_ = WorkerState::IDLE;
         return;
     }
-    // uint32_t compute_time = micros() - start_time;
+
+    
+    // rANS compression: output_buffer_ → input_buffer_ (cannot compress in-place)
+    uint32_t raw_output_size = current_task_.out_channels * current_task_.out_h * current_task_.out_w;
+    uint32_t compress_start = micros();
+    size_t compress_size = rans::compress(output_buffer_, raw_output_size, input_buffer_, sizeof(input_buffer_));
+    uint32_t compress_time = micros() - compress_start;
+    if (0 == compress_size) {
+        Serial.println("Compression failed");
+        SendError(ErrorCode::ERR_OUT_OF_MEMORY, "Compression failed");
+        state_ = WorkerState::IDLE;
+        return;
+    }
+#ifdef DEBUG
+    Serial.printf("Worker %d finished computing, raw output size: %d bytes, compressed size: %d bytes, compute time: %d us, compression time: %d us\n", 
+        worker_id_, raw_output_size, compress_size, task_elapsed_time, compress_time);
+#endif
+
+
     current_result_.compute_time_us = task_elapsed_time;
-    current_result_.output_size = current_task_.out_channels * current_task_.out_h * current_task_.out_w; // TODO need to check the actual output size
+    current_result_.compress_time_us = compress_time;
+    current_result_.output_size = static_cast<uint32_t>(compress_size);
     state_ = WorkerState::SENDING_RESULT;
 }
 
@@ -243,7 +284,7 @@ void Worker::HandleSendingResult() {
     
     while (offset < total) {
         size_t chunk = min(CHUNK_SIZE, total - offset);
-        Send((const uint8_t *)&output_buffer_[offset], chunk);
+        Send((const uint8_t *)&input_buffer_[offset], chunk);
         offset += chunk;
     }
 

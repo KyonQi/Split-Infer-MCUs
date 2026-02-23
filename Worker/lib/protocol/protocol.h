@@ -70,9 +70,10 @@ struct TaskMessage {
 
 struct ResultMessage {
     uint32_t compute_time_us;
+    uint32_t compress_time_us;
     uint32_t output_size; // in bytes
     // maybe performance records here
-} __attribute__((packed)); // TODO need further check the attribute; 8 bytes for payload
+} __attribute__((packed)); // 12 bytes for payload
 
 struct ErrorMessage {
     uint8_t error_code;

@@ -55,7 +55,7 @@ class WorkerManager:
             worker.writer.write(header.pack())
             if payload:
                 worker.writer.write(payload)
-            # await worker.writer.drain() #TODO further check if we really need to await drain here, i dont think so right now cuz we have error message back from MCU
+            await worker.writer.drain()  # flush immediately
             
             return True
         

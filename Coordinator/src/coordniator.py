@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import socket
 import sys
 import time
 import json
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 from .protocol import *
 from .work_manager import *
+from .rans import *
 # from .task_queue import *
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,15 @@ class Coordinator:
 
     async def on_client_connected(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """ connected callback """
+        # Disable Nagle's algorithm and enable TCP_QUICKACK
+        sock: socket.socket = writer.get_extra_info('socket')
+        if sock is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+            except (AttributeError, OSError):
+                pass  # TCP_QUICKACK is Linux-only
+            logger.info(f"[Coordinator]: Set TCP_NODELAY + TCP_QUICKACK on socket")
         logger.info(f"[Coordinator]: New worker connected from {writer.get_extra_info('peername')}")
         worker = self.worker_manager.add_worker(reader, writer) # worker needs contains some info
         try:
@@ -145,7 +156,7 @@ class Coordinator:
                 "layer_type": LayerType(layer.type).name,
                 "total_time_ms": 0.0,
                 "avg_compute_ms": 0.0,
-                "avg_comm_ms": 0.0,
+                "avg_compress_ms": 0.0,
                 "workers": {}, #
             }
 
@@ -162,6 +173,9 @@ class Coordinator:
                 self.current_layer_stats["avg_compute_ms"] = float(np.mean([
                     ws["mcu_compute_ms"] for ws in worker_stats
                 ]))
+                self.current_layer_stats["avg_compress_ms"] = float(np.mean([
+                    ws["mcu_compress_ms"] for ws in worker_stats
+                ]))
                 # self.current_layer_stats["avg_comm_ms"] = float(np.mean([
                 #     ws["send_time_ms"] + ws["recv_time_ms"] for ws in worker_stats
                 # ])) # it's not reasonable, since we're using asycnio, read/write only relates to the data buffer
@@ -170,6 +184,7 @@ class Coordinator:
                 f"[Coordinator]: Layer {layer_idx} done — "
                 f"total={self.current_layer_stats['total_time_ms']:.2f}ms  "
                 f"compute={self.current_layer_stats['avg_compute_ms']:.2f}ms  "
+                f"compress={self.current_layer_stats['avg_compress_ms']:.2f}ms"
                 # f"comm={self.current_layer_stats['avg_comm_ms']:.2f}ms"
             )
 
@@ -349,6 +364,19 @@ class Coordinator:
         # Ensure C-contiguous layout before serializing: slicing along axis-1 (e.g. padded[:, a:b, :])
         input_bytes = np.ascontiguousarray(input_patch).tobytes()
 
+        # rANS compress input data before sending
+        original_size = len(input_bytes)
+        compressed_bytes = rans_compress(input_bytes)
+        if len(compressed_bytes) < original_size:
+            # Compression was beneficial — update task_msg.input_size to compressed size
+            task_msg.input_size = len(compressed_bytes)
+            input_bytes = compressed_bytes
+            logger.debug(
+                f"[Coordinator]: Compressed input for worker {worker.worker_id}: "
+                f"{original_size} -> {len(compressed_bytes)} bytes "
+                f"({original_size / len(compressed_bytes):.2f}x)"
+            )
+
         send_start = time.perf_counter()
         await self.worker_manager.send_message(worker, MessageType.TASK, task_msg.pack() + input_bytes)
         send_time = time.perf_counter() - send_start
@@ -407,6 +435,19 @@ class Coordinator:
 
             logger.debug(f"[Coordinator]: Received result header from worker {worker.worker_id} with output size {result_msg.output_size} bytes")
             
+            # rANS decompression
+            if is_rans_compressed(output_data):
+                decompress_start = time.perf_counter()
+                raw_bytes = rans_decompress(output_data)
+                decompress_time = time.perf_counter() - decompress_start
+                logger.debug(
+                    f"[Coordinator]: Decompressed rANS from worker {worker.worker_id}: "
+                    f"{len(output_data)} -> {len(raw_bytes)} bytes, "
+                    f"decompress time: {decompress_time * 1000:.2f} ms"
+                )
+                output_data = raw_bytes
+
+
             # parse output data and write to the correct position in the output feature map
             if output.ndim == 3:
                 # Conv layer: (C, H_slice, W)
@@ -428,6 +469,7 @@ class Coordinator:
             if worker.worker_id in self.current_layer_stats["workers"]:
                 ws = self.current_layer_stats["workers"][worker.worker_id]
                 ws["mcu_compute_ms"] = result_msg.compute_time_us / 1000
+                ws["mcu_compress_ms"] = result_msg.compress_time_us / 1000
                 ws["recv_time_ms"] = recv_time * 1000
             
             # mark worker idle again
@@ -436,7 +478,8 @@ class Coordinator:
             
             logger.debug(f"[Coordinator]: Received result from worker {worker.worker_id}, "
                         f"slice [{start_idx}, {end_idx}), "
-                        f"compute time: {result_msg.compute_time_us / 1000:.2f} ms")
+                        f"compute time: {result_msg.compute_time_us / 1000:.2f} ms, "
+                        f"compress time: {result_msg.compress_time_us / 1000:.2f} ms")
         
         except Exception as e:
             logger.error(f"[Coordinator]: Error receiving result from worker {worker.worker_id}: {e}")
@@ -511,5 +554,6 @@ class Coordinator:
                 f"Layer {s['layer_idx']:>3} [{s['layer_type']:>8}] {s['layer_name']}: "
                 f"total={s['total_time_ms']:.2f}ms  "
                 f"compute={s.get('avg_compute_ms', 0):.2f}ms  "
+                f"compress={s.get('avg_compress_ms', 0):.2f}ms"
                 # f"comm={s.get('avg_comm_ms', 0):.2f}ms"
             )
