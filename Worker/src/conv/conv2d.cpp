@@ -260,7 +260,52 @@ void depthwise_conv2d(const uint8_t *input, const int8_t *weights, const int32_t
     }
 }
 
+// depthwise conv with asymmetric padding (block mode: applied after expand, before DW)
+// The bounds check naturally implements zero-padding with input_zero_point:
+//   skipped pixel contributes 0 to acc ≡ (z_in - z_in) * w = 0
+void depthwise_conv2d_padded(const uint8_t *input, const int8_t *weights, const int32_t *bias,
+                    uint8_t *output, const LayerConfig *cfg, const QuantParams *qp,
+                    const uint8_t in_h, const uint8_t in_w,
+                    uint8_t pad_top, uint8_t pad_bottom, uint8_t pad_left, uint8_t pad_right) {
+    assert(cfg->input_channels == cfg->output_channels);
 
+    const int out_h = (in_h + pad_top + pad_bottom - cfg->kernel_size) / cfg->stride + 1;
+    const int out_w = (in_w + pad_left + pad_right - cfg->kernel_size) / cfg->stride + 1;
+
+    for (size_t oc = 0; oc < cfg->output_channels; ++oc) {
+        int32_t bias_val = bias[oc];
+        float weight_scale = qp->weight_scales[oc];
+        int weight_zero_point = qp->weight_zps[oc];
+        float multiplier = (qp->input_scale * weight_scale) / qp->output_scale;
+
+        for (size_t oh = 0; oh < out_h; ++oh) {
+            for (size_t ow = 0; ow < out_w; ++ow) {
+                int32_t acc = bias_val;
+
+                int start_y = (int)oh * cfg->stride - pad_top;
+                int start_x = (int)ow * cfg->stride - pad_left;
+
+                for (size_t kh = 0; kh < cfg->kernel_size; ++kh) {
+                    for (size_t kw = 0; kw < cfg->kernel_size; ++kw) {
+                        int in_y = start_y + kh;
+                        int in_x = start_x + kw;
+
+                        if (in_y >= 0 && in_y < in_h && in_x >= 0 && in_x < in_w) {
+                            int32_t input_val = (int32_t) input[oc * in_h * in_w + in_y * in_w + in_x] - qp->input_zero_point;
+                            int32_t weight_val = (int32_t) weights[oc * cfg->kernel_size * cfg->kernel_size +
+                                                        kh * cfg->kernel_size + kw] - weight_zero_point;
+                            acc += input_val * weight_val;
+                        }
+                    }
+                }
+
+                float acc_float = acc * multiplier + qp->output_zero_point;
+                int o_idx = oc * out_h * out_w + oh * out_w + ow;
+                output[o_idx] = (uint8_t) max( 0, min(255, (int32_t) roundf(acc_float) ) );
+            }
+        }
+    }
+}
 
 
     

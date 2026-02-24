@@ -32,6 +32,7 @@ private:
     void HandleIdle();
     void HandleReceivingTask();
     void HandleComputing();
+    void HandleBlockComputing();
     void HandleSendingResult();
 
 private:

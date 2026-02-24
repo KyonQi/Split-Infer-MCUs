@@ -19,6 +19,12 @@ namespace conv2d {
     void depthwise_conv2d(const uint8_t *input, const int8_t *weights, const int32_t *bias, 
                         uint8_t *output, const LayerConfig *cfg, const QuantParams *qp, const uint8_t in_h, const uint8_t in_w);
 
+    // depthwise conv with asymmetric padding (for block mode: worker-side DW padding after expand)
+    void depthwise_conv2d_padded(const uint8_t *input, const int8_t *weights, const int32_t *bias,
+                        uint8_t *output, const LayerConfig *cfg, const QuantParams *qp,
+                        const uint8_t in_h, const uint8_t in_w,
+                        uint8_t pad_top, uint8_t pad_bottom, uint8_t pad_left, uint8_t pad_right);
+
     // void depthwise_conv2d_dsp(const uint8_t *input, const int8_t *weights, const int32_t *bias, 
     //                     uint8_t *output, const LayerConfig *cfg, const QuantParams *qp, const uint8_t in_h, const uint8_t in_w);
 

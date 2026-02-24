@@ -52,6 +52,7 @@ struct RegisterAckMessage {
 struct TaskMessage {
     LayerType layer_type;
     uint32_t layer_idx;
+    uint32_t end_layer_idx;     // block mode: last layer index (== layer_idx for single layer)
 
     // input/output channels
     uint32_t in_channels, in_h, in_w;
@@ -65,8 +66,12 @@ struct TaskMessage {
     uint32_t in_features, out_features;
 
     // data size
-    uint32_t input_size; // in bytes    
-} __attribute__((packed)); // TODO need further check the attribute; 29 bytes for payload
+    uint32_t input_size; // in bytes
+
+    // block mode: DW height padding (worker applies after expand, before DW)
+    uint8_t block_pad_top;    // rows of DW zero-padding at top    (0 or dw_padding)
+    uint8_t block_pad_bottom; // rows of DW zero-padding at bottom (0 or dw_padding)
+} __attribute__((packed));
 
 struct ResultMessage {
     uint32_t compute_time_us;
