@@ -8,7 +8,8 @@ from torchvision import transforms
 import numpy as np
 from pathlib import Path
 from PIL import Image
-from src.coordniator import Coordinator
+from src.config import CoordinatorConfig
+from src.coordinator import Coordinator
 
 # logging.basicConfig(filename='./coordinator.log', 
 #                     filemode='w',
@@ -47,12 +48,12 @@ async def wait_for_workers(coord: Coordinator, num_workers: int):
         await asyncio.sleep(1)
     logger.info(f"All {len(coord.worker_manager.workers.values())} workers have connected.")
 
-async def main(workers: int):
-    coord = Coordinator(host='192.168.1.10', port=54321)
+async def main(config: CoordinatorConfig):
+    coord = Coordinator(config)
     print("Coordinator is starting...\n")
-    logger.info("Coordinator is starting...")
+    logger.info(f"Coordinator is starting (mode={config.execution_mode})...")
     server_task = asyncio.create_task(coord.start()) # start will block until the server is closed so we run it in a separate task
-    await wait_for_workers(coord, workers) # block until all workes have connected
+    await wait_for_workers(coord, config.num_workers) # block until all workers have connected
     try:
         # Load and prepare input data (example)
         input_image_path = Path("./data/panda.jpg")
@@ -79,13 +80,31 @@ async def main(workers: int):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Coordinator for distributed DNN inference")
     parser.add_argument('--workers', type=int, default=4, help='Number of workers')
-    parser.add_argument('--log-level', type=str, default='INFO', help='Logging level (DEBUG, INFO, WARNING, ERROR)')
+    parser.add_argument('--mode', type=str, choices=['block', 'layer'], default='block',
+                        help='Execution mode: block (fused layers) or layer (per-layer)')
+    parser.add_argument('--model-config', type=str, default='./src/model_config.json',
+                        help='Path to model config JSON')
+    parser.add_argument('--host', type=str, default='192.168.1.10',
+                        help='Coordinator bind address')
+    parser.add_argument('--port', type=int, default=54321,
+                        help='Coordinator bind port')
+    parser.add_argument('--log-level', type=str, default='INFO',
+                        help='Logging level (DEBUG, INFO, WARNING, ERROR)')
     args = parser.parse_args()
 
     setup_logging(args.log_level)
-    
+
+    config = CoordinatorConfig(
+        host=args.host,
+        port=args.port,
+        num_workers=args.workers,
+        execution_mode=args.mode,
+        model_config_path=args.model_config,
+        log_level=args.log_level,
+    )
+
     try:
-        asyncio.run(main(args.workers))
+        asyncio.run(main(config))
     except KeyboardInterrupt:
         print("\nCoordinator is shutting down...\n")
         logger.info("Coordinator is shutting down...")

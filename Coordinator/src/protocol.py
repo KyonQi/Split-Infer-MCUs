@@ -104,8 +104,6 @@ class TaskMessage:
     out_features: int
 
     # data
-    # TODO in bytes, the real data will be sent after the header and TaskMessage
-    # But really???
     input_size: int
 
     # block mode: DW height padding (worker applies after expand, before DW)
