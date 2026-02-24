@@ -66,7 +66,11 @@ struct TaskMessage {
     uint32_t in_features, out_features;
 
     // data size
-    uint32_t input_size; // in bytes    
+    uint32_t input_size; // in bytes
+
+    // block mode: DW height padding (worker applies after expand, before DW)
+    uint8_t block_pad_top;    // rows of DW zero-padding at top    (0 or dw_padding)
+    uint8_t block_pad_bottom; // rows of DW zero-padding at bottom (0 or dw_padding)
 } __attribute__((packed));
 
 struct ResultMessage {

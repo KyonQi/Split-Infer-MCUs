@@ -301,23 +301,30 @@ void Worker::HandleBlockComputing() {
         // Infer layer type from config: depthwise has in_channels == out_channels and kernel > 1
         bool is_depthwise = (cfg->input_channels == cfg->output_channels && cfg->kernel_size > 1);
         if (is_depthwise) {
-            conv2d::depthwise_conv2d(src, weights, bias, dst,
-                                     cfg, &model_quant_params[idx], cur_h, cur_w);
+            // Worker-side DW padding: use block_pad_top/bottom for height,
+            // cfg->padding for width.  The padded DW kernel handles padding
+            // via bounds-checking, which is exact with z_in_dw.
+            uint8_t pt = current_task_.block_pad_top;
+            uint8_t pb = current_task_.block_pad_bottom;
+            uint8_t pl = cfg->padding;
+            uint8_t pr = cfg->padding;
+            conv2d::depthwise_conv2d_padded(src, weights, bias, dst,
+                                     cfg, &model_quant_params[idx],
+                                     cur_h, cur_w, pt, pb, pl, pr);
+            cur_h = (cur_h + pt + pb - cfg->kernel_size) / cfg->stride + 1;
+            cur_w = (cur_w + pl + pr - cfg->kernel_size) / cfg->stride + 1;
         } else {
             conv2d::native_conv2d(src, weights, bias, dst,
                                   cfg, &model_quant_params[idx], cur_h, cur_w);
+            cur_h = (cur_h - cfg->kernel_size) / cfg->stride + 1;
+            cur_w = (cur_w - cfg->kernel_size) / cfg->stride + 1;
         }
 
         total_compute_us += micros() - t0;
 
-        // Update spatial dims: out_h = (in_h - kernel_size) / stride + 1
-        // No padding term because coordinator pre-pads the block input
-        cur_h = (cur_h - cfg->kernel_size) / cfg->stride + 1;
-        cur_w = (cur_w - cfg->kernel_size) / cfg->stride + 1;
-
 #ifdef DEBUG
-        Serial.printf("  Layer %u (%s): %ux%u -> %ux%u\n",
-                      idx, cfg->name, (cur_h - 1) * cfg->stride + cfg->kernel_size, cur_w, cur_h, cur_w);
+        Serial.printf("  Layer %u (%s): -> %ux%u\n",
+                      idx, cfg->name, cur_h, cur_w);
 #endif
 
         // Ping-pong: swap src and dst

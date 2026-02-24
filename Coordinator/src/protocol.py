@@ -78,7 +78,7 @@ class RegisterAckMessage:
 # TODO optimize the payload structure, e.g. conv params and linear params don't need to be transmitted in the task message
 @dataclass
 class TaskMessage:
-    FORMAT = '<BIIIIIIIIBBBHIII'
+    FORMAT = '<BIIIIIIIIBBBHIIIBB'
     SIZE = struct.calcsize(FORMAT)
     
     layer_type: LayerType
@@ -106,13 +106,18 @@ class TaskMessage:
     # data
     # TODO in bytes, the real data will be sent after the header and TaskMessage
     # But really???
-    input_size: int 
+    input_size: int
+
+    # block mode: DW height padding (worker applies after expand, before DW)
+    block_pad_top: int = 0
+    block_pad_bottom: int = 0
 
     def pack(self) -> bytes:
         data = struct.pack('<BII', self.layer_type, self.layer_idx, self.end_layer_idx)
         data += struct.pack('<IIIIII', self.in_channels, self.in_h, self.in_w, self.out_channels, self.out_h, self.out_w)
         data += struct.pack('<BBBH', self.kernel_size, self.stride, self.padding, self.groups)
         data += struct.pack('<III', self.in_features, self.out_features, self.input_size)
+        data += struct.pack('<BB', self.block_pad_top, self.block_pad_bottom)
         return data
 
 

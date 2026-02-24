@@ -286,19 +286,18 @@ class Coordinator:
     async def _distribute_block(self, block: BlockConfig):
         """Distribute a multi-layer block by row-splitting the block input.
 
-        The coordinator pads the block input to account for the depthwise layer's
-        receptive field (halo), then each worker receives a slice and runs all
-        layers in the block sequentially (expand → dw → project) without
-        returning intermediate results.
+        The coordinator sends un-padded input slices (with halo overlap for the
+        DW receptive field) to each worker.  Each worker runs all layers in the
+        block sequentially (expand → dw → project).
 
-        NOTE: The block input is padded with z_in of the first layer (expand).
-        After expand, the padded border pixels produce non-zero values instead of
-        the ideal zero-padding (z_in_dw = 0) for the DW layer. This introduces a
-        minor numerical error at the 1-pixel feature-map border. For interior
-        halo rows (overlapping between patches), the expand processes real data,
-        so those DW inputs are exact.
-        TODO: For exact border handling, the worker could zero-pad the expand
-        output before running the DW layer.
+        DW padding is applied on the worker side *after* the expand layer,
+        using the DW layer's own input zero-point.  This avoids the numerical
+        error that arises when padding is applied before expand (where
+        z_in_expand ≠ z_in_dw).
+
+        The worker receives ``block_pad_top`` / ``block_pad_bottom`` in the task
+        message to know how many rows of height-padding the DW layer needs.
+        Width padding is always symmetric and derived from ``model_layer_config``.
         """
         C, H, W = self.feature_map.shape
 
@@ -325,18 +324,6 @@ class Coordinator:
         H_out = (H + 2 * dw_padding - dw_kernel) // dw_stride + 1
         W_out = (W + 2 * dw_padding - dw_kernel) // dw_stride + 1
 
-        # Pad block input for DW receptive field (both height and width)
-        first_qp = block.quant_params[0]
-        if dw_padding > 0:
-            padded = np.pad(
-                self.feature_map,
-                ((0, 0), (dw_padding, dw_padding), (dw_padding, dw_padding)),
-                mode='constant',
-                constant_values=first_qp.z_in
-            )
-        else:
-            padded = self.feature_map
-
         # Block's final output channels
         out_channels = block.layers[-1].out_channels
 
@@ -352,12 +339,20 @@ class Coordinator:
             if out_start >= H_out:
                 continue
 
-            # Map output rows → padded input rows
-            # DW: out_row r needs padded input rows [r*stride, r*stride + kernel)
-            in_start_y = out_start * dw_stride
-            in_end_y = (out_end - 1) * dw_stride + dw_kernel
+            # Map DW output rows → un-padded block-input rows (with halo).
+            # DW output row r reads expand-output rows [r*stride - dw_padding, r*stride - dw_padding + kernel).
+            # Expand is 1×1 so these are the same block-input rows.
+            in_start_y_raw = out_start * dw_stride - dw_padding
+            in_end_y_raw   = (out_end - 1) * dw_stride + dw_kernel - dw_padding  # exclusive
 
-            input_patch = padded[:, in_start_y:in_end_y, :]
+            in_start_y = max(0, in_start_y_raw)
+            in_end_y   = min(H, in_end_y_raw)
+
+            # Height padding the worker must apply after expand, before DW
+            pad_top    = in_start_y - in_start_y_raw   # >0 only for first chunk
+            pad_bottom = in_end_y_raw - in_end_y       # >0 only for last chunk
+
+            input_patch = self.feature_map[:, in_start_y:in_end_y, :]
 
             task_msg = TaskMessage(
                 layer_type=block.layers[0].type,
@@ -371,11 +366,13 @@ class Coordinator:
                 out_w=W_out,
                 kernel_size=block.layers[0].kernel_size,
                 stride=block.layers[0].stride,
-                padding=0,  # padding already applied by coordinator
+                padding=0,  # no coordinator-side padding
                 groups=block.layers[0].groups,
                 in_features=0,
                 out_features=0,
-                input_size=input_patch.size
+                input_size=input_patch.size,
+                block_pad_top=pad_top,
+                block_pad_bottom=pad_bottom,
             )
 
             task = asyncio.create_task(
@@ -385,7 +382,8 @@ class Coordinator:
             logger.debug(
                 f"[Coordinator]: Block [{block.start_idx}-{block.end_idx}] "
                 f"assigned output rows {out_start}-{out_end} to worker {worker.worker_id}, "
-                f"input patch shape {input_patch.shape}"
+                f"input patch shape {input_patch.shape}, "
+                f"pad_top={pad_top}, pad_bottom={pad_bottom}"
             )
 
         await asyncio.gather(*[t[3] for t in tasks])
