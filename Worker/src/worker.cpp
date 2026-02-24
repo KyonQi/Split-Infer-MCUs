@@ -206,6 +206,14 @@ void Worker::HandleComputing() {
 #ifdef DEBUG
     Serial.printf("Worker %d processing task %d...\n", worker_id_, static_cast<uint8_t>(current_task_.layer_type));
 #endif
+
+    // Block mode: multiple consecutive layers
+    if (current_task_.end_layer_idx > current_task_.layer_idx) {
+        HandleBlockComputing();
+        return;
+    }
+
+    // Single layer mode (original path)
     int layer_idx = current_task_.layer_idx;
     bool success = false;
     uint8_t *input = input_buffer_;
@@ -265,6 +273,78 @@ void Worker::HandleComputing() {
     current_result_.compress_time_us = 0;
     // current_result_.output_size = static_cast<uint32_t>(compress_size);
     current_result_.output_size = current_task_.out_channels * current_task_.out_h * current_task_.out_w; // TODO need further check if we can directly send raw output without compression
+    state_ = WorkerState::SENDING_RESULT;
+}
+
+void Worker::HandleBlockComputing() {
+    uint32_t start_idx = current_task_.layer_idx;
+    uint32_t end_idx = current_task_.end_layer_idx;
+
+#ifdef DEBUG
+    Serial.printf("Worker %d block computing layers %u -> %u\n", worker_id_, start_idx, end_idx);
+#endif
+
+    uint8_t *src = input_buffer_;
+    uint8_t *dst = output_buffer_;
+
+    uint32_t cur_h = current_task_.in_h;
+    uint32_t cur_w = current_task_.in_w;
+    uint32_t total_compute_us = 0;
+
+    for (uint32_t idx = start_idx; idx <= end_idx; idx++) {
+        const LayerConfig *cfg = &model_layer_config[idx];
+        const int8_t *weights = model_weights[idx].weights;
+        const int32_t *bias = model_weights[idx].bias;
+
+        uint32_t t0 = micros();
+
+        // Infer layer type from config: depthwise has in_channels == out_channels and kernel > 1
+        bool is_depthwise = (cfg->input_channels == cfg->output_channels && cfg->kernel_size > 1);
+        if (is_depthwise) {
+            conv2d::depthwise_conv2d(src, weights, bias, dst,
+                                     cfg, &model_quant_params[idx], cur_h, cur_w);
+        } else {
+            conv2d::native_conv2d(src, weights, bias, dst,
+                                  cfg, &model_quant_params[idx], cur_h, cur_w);
+        }
+
+        total_compute_us += micros() - t0;
+
+        // Update spatial dims: out_h = (in_h - kernel_size) / stride + 1
+        // No padding term because coordinator pre-pads the block input
+        cur_h = (cur_h - cfg->kernel_size) / cfg->stride + 1;
+        cur_w = (cur_w - cfg->kernel_size) / cfg->stride + 1;
+
+#ifdef DEBUG
+        Serial.printf("  Layer %u (%s): %ux%u -> %ux%u\n",
+                      idx, cfg->name, (cur_h - 1) * cfg->stride + cfg->kernel_size, cur_w, cur_h, cur_w);
+#endif
+
+        // Ping-pong: swap src and dst
+        uint8_t *tmp = src;
+        src = dst;
+        dst = tmp;
+    }
+
+    // After the loop, src points to the last output (swapped after last layer write to dst)
+    // For odd number of layers: src = output_buffer_  (good, HandleSendingResult reads output_buffer_)
+    // For even number of layers: src = input_buffer_  (need to copy to output_buffer_)
+    uint32_t num_layers = end_idx - start_idx + 1;
+    uint32_t output_size = current_task_.out_channels * current_task_.out_h * current_task_.out_w;
+
+    if (num_layers % 2 == 0) {
+        // Final output is in input_buffer_, copy to output_buffer_
+        memcpy(output_buffer_, input_buffer_, output_size);
+    }
+
+#ifdef DEBUG
+    Serial.printf("Worker %d block done: %u layers, output %u bytes, compute %u us\n",
+                  worker_id_, num_layers, output_size, total_compute_us);
+#endif
+
+    current_result_.compute_time_us = total_compute_us;
+    current_result_.compress_time_us = 0;
+    current_result_.output_size = output_size;
     state_ = WorkerState::SENDING_RESULT;
 }
 

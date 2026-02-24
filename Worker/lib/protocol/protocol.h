@@ -52,6 +52,7 @@ struct RegisterAckMessage {
 struct TaskMessage {
     LayerType layer_type;
     uint32_t layer_idx;
+    uint32_t end_layer_idx;     // block mode: last layer index (== layer_idx for single layer)
 
     // input/output channels
     uint32_t in_channels, in_h, in_w;
@@ -66,7 +67,7 @@ struct TaskMessage {
 
     // data size
     uint32_t input_size; // in bytes    
-} __attribute__((packed)); // TODO need further check the attribute; 29 bytes for payload
+} __attribute__((packed));
 
 struct ResultMessage {
     uint32_t compute_time_us;

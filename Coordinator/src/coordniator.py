@@ -44,6 +44,21 @@ class QuantParams:
     s_residual_out: Optional[float] = None
     z_residual_out: Optional[int] = None        
 
+@dataclass
+class BlockConfig:
+    """A group of consecutive layers executed as one block on workers.
+    
+    For multi-layer blocks (e.g. expand + dw + project), all layers are
+    computed on the MCU in a single round-trip, avoiding transfer of
+    intermediate (expanded) feature maps.
+    """
+    start_idx: int                                    # first layer index (inclusive)
+    end_idx: int                                      # last layer index (inclusive)
+    layers: list                                      # LayerConfig objects in this block
+    quant_params: list                                # QuantParams for each layer in the block
+    residual_cache_name: Optional[str] = None         # save block input for residual add later
+    residual_connect_name: Optional[str] = None       # add cached residual to block output
+
 class Coordinator:
     def __init__(self, host: str = '192, 168, 1, 10', port: int = 54321):
         self.host: str = host
@@ -70,9 +85,6 @@ class Coordinator:
 
         tasks = [
             asyncio.create_task(server.serve_forever()), # start to listen
-            # asyncio.create_task(self.task_dispatcher()), # start to dispatch tasks
-            asyncio.create_task(self.worker_manager.heartbeat_monitor()), # start to monitor worker heartbeat
-            # asyncio.create_task(self.stats_printer()), # start to print stats
         ]
         try:
             await asyncio.gather(*tasks)
@@ -89,11 +101,11 @@ class Coordinator:
         sock: socket.socket = writer.get_extra_info('socket')
         if sock is not None:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            try:
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
-            except (AttributeError, OSError):
-                pass  # TCP_QUICKACK is Linux-only
-            logger.info(f"[Coordinator]: Set TCP_NODELAY + TCP_QUICKACK on socket")
+            # try:
+            #     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+            # except (AttributeError, OSError):
+            #     pass  # TCP_QUICKACK is Linux-only
+            logger.info(f"[Coordinator]: Set TCP_NODELAY on socket")
         logger.info(f"[Coordinator]: New worker connected from {writer.get_extra_info('peername')}")
         worker = self.worker_manager.add_worker(reader, writer) # worker needs contains some info
         try:
@@ -144,49 +156,80 @@ class Coordinator:
         self.feature_map = self._quantize_input(input_data, self.quant_params_list[0]) # quantize the input data to uint8, and fill in the feature_map
         self.residual_buffers.clear()
         
-        start_time = time.time()
-        for layer_idx, (layer, quant_params) in enumerate(zip(self.layer_config_list, self.quant_params_list)):
-            self.current_layer_idx = layer_idx
-            logger.debug(f"[Coordinator]: Executing layer {layer_idx} - {layer.name} ({LayerType(layer.type)})")
-            
-            # init current layer stats
-            self.current_layer_stats = {
-                "layer_idx": layer_idx,
-                "layer_name": layer.name,
-                "layer_type": LayerType(layer.type).name,
-                "total_time_ms": 0.0,
-                "avg_compute_ms": 0.0,
-                "avg_compress_ms": 0.0,
-                "workers": {}, #
-            }
-
-            layer_start = time.perf_counter()
-            await self._run_layer(layer, quant_params)
-            layer_time = time.perf_counter() - layer_start
-                        
-            logger.debug(f"[Coordinator]: Layer {layer_idx} completed in {layer_time:.4f} seconds, output shape {self.feature_map.shape}")
+        blocks = self._group_layers_into_blocks()
+        logger.info(f"[Coordinator]: Grouped {len(self.layer_config_list)} layers into {len(blocks)} blocks")
+        for blk in blocks:
+            names = [l.name for l in blk.layers]
+            logger.debug(f"  Block [{blk.start_idx}-{blk.end_idx}]: {names}"
+                         f"  residual_cache={blk.residual_cache_name}  residual_connect={blk.residual_connect_name}")
         
-            # current layer stats
-            self.current_layer_stats["total_time_ms"] = layer_time * 1000
-            worker_stats = list(self.current_layer_stats["workers"].values())
-            if worker_stats:
-                self.current_layer_stats["avg_compute_ms"] = float(np.mean([
-                    ws["mcu_compute_ms"] for ws in worker_stats
-                ]))
-                self.current_layer_stats["avg_compress_ms"] = float(np.mean([
-                    ws["mcu_compress_ms"] for ws in worker_stats
-                ]))
-                # self.current_layer_stats["avg_comm_ms"] = float(np.mean([
-                #     ws["send_time_ms"] + ws["recv_time_ms"] for ws in worker_stats
-                # ])) # it's not reasonable, since we're using asycnio, read/write only relates to the data buffer
-            self.stats.append(self.current_layer_stats) # store the last layer stats
-            logger.debug(
-                f"[Coordinator]: Layer {layer_idx} done — "
-                f"total={self.current_layer_stats['total_time_ms']:.2f}ms  "
-                f"compute={self.current_layer_stats['avg_compute_ms']:.2f}ms  "
-                f"compress={self.current_layer_stats['avg_compress_ms']:.2f}ms"
-                # f"comm={self.current_layer_stats['avg_comm_ms']:.2f}ms"
-            )
+        start_time = time.time()
+        for block in blocks:
+            is_single = (block.start_idx == block.end_idx)
+
+            if is_single:
+                # ── Single-layer block: use original per-layer path ──
+                layer = block.layers[0]
+                qp = block.quant_params[0]
+                self.current_layer_idx = block.start_idx
+
+                self.current_layer_stats = {
+                    "layer_idx": block.start_idx,
+                    "layer_name": layer.name,
+                    "layer_type": LayerType(layer.type).name,
+                    "total_time_ms": 0.0,
+                    "avg_compute_ms": 0.0,
+                    "avg_compress_ms": 0.0,
+                    "workers": {},
+                }
+
+                layer_start = time.perf_counter()
+                await self._run_layer(layer, qp)
+                layer_time = time.perf_counter() - layer_start
+
+                self.current_layer_stats["total_time_ms"] = layer_time * 1000
+                worker_stats = list(self.current_layer_stats["workers"].values())
+                if worker_stats:
+                    self.current_layer_stats["avg_compute_ms"] = float(np.mean([ws["mcu_compute_ms"] for ws in worker_stats]))
+                    self.current_layer_stats["avg_compress_ms"] = float(np.mean([ws["mcu_compress_ms"] for ws in worker_stats]))
+                self.stats.append(self.current_layer_stats)
+                logger.debug(
+                    f"[Coordinator]: Layer {block.start_idx} done — "
+                    f"total={self.current_layer_stats['total_time_ms']:.2f}ms  "
+                    f"compute={self.current_layer_stats['avg_compute_ms']:.2f}ms  "
+                    f"compress={self.current_layer_stats['avg_compress_ms']:.2f}ms"
+                )
+            else:
+                # ── Multi-layer block (e.g. expand + dw + project) ──
+                block_names = "+".join(l.name for l in block.layers)
+                self.current_layer_idx = block.end_idx  # residual uses the last layer's quant params
+
+                self.current_layer_stats = {
+                    "layer_idx": f"{block.start_idx}-{block.end_idx}",
+                    "layer_name": block_names,
+                    "layer_type": "BLOCK",
+                    "total_time_ms": 0.0,
+                    "avg_compute_ms": 0.0,
+                    "avg_compress_ms": 0.0,
+                    "workers": {},
+                }
+
+                block_start = time.perf_counter()
+                await self._run_block(block)
+                block_time = time.perf_counter() - block_start
+
+                self.current_layer_stats["total_time_ms"] = block_time * 1000
+                worker_stats = list(self.current_layer_stats["workers"].values())
+                if worker_stats:
+                    self.current_layer_stats["avg_compute_ms"] = float(np.mean([ws["mcu_compute_ms"] for ws in worker_stats]))
+                    self.current_layer_stats["avg_compress_ms"] = float(np.mean([ws["mcu_compress_ms"] for ws in worker_stats]))
+                self.stats.append(self.current_layer_stats)
+                logger.debug(
+                    f"[Coordinator]: Block [{block.start_idx}-{block.end_idx}] done — "
+                    f"total={self.current_layer_stats['total_time_ms']:.2f}ms  "
+                    f"compute={self.current_layer_stats['avg_compute_ms']:.2f}ms  "
+                    f"compress={self.current_layer_stats['avg_compress_ms']:.2f}ms"
+                )
 
         total_time = time.time() - start_time
         logger.info(f"[Coordinator]: Inference execution completed in {total_time:.4f} seconds")
@@ -216,6 +259,138 @@ class Coordinator:
         # apply residual
         if layer.residual_connect_from:
             await self._apply_residual(layer.residual_connect_from)
+    
+    async def _run_block(self, block: BlockConfig):
+        """Execute a multi-layer block (e.g. expand + depthwise + project) in one round-trip.
+
+        Residual handling stays on the coordinator side:
+        - Before the block: save block input if residual_cache_name is set
+        - After the block:  add cached residual if residual_connect_name is set
+        """
+        # Save residual (the block input, before expand)
+        if block.residual_cache_name:
+            first_qp = block.quant_params[0]
+            self.residual_buffers[block.residual_cache_name] = (
+                self.feature_map.copy(), first_qp.s_in, first_qp.z_in
+            )
+            logger.debug(f"[Coordinator]: Stored residual buffer '{block.residual_cache_name}' with shape {self.feature_map.shape}")
+
+        # Distribute block across workers
+        await self._distribute_block(block)
+
+        # Apply residual (add cached input to block output)
+        if block.residual_connect_name:
+            self.current_layer_idx = block.end_idx
+            await self._apply_residual(block.residual_connect_name)
+
+    async def _distribute_block(self, block: BlockConfig):
+        """Distribute a multi-layer block by row-splitting the block input.
+
+        The coordinator pads the block input to account for the depthwise layer's
+        receptive field (halo), then each worker receives a slice and runs all
+        layers in the block sequentially (expand → dw → project) without
+        returning intermediate results.
+
+        NOTE: The block input is padded with z_in of the first layer (expand).
+        After expand, the padded border pixels produce non-zero values instead of
+        the ideal zero-padding (z_in_dw = 0) for the DW layer. This introduces a
+        minor numerical error at the 1-pixel feature-map border. For interior
+        halo rows (overlapping between patches), the expand processes real data,
+        so those DW inputs are exact.
+        TODO: For exact border handling, the worker could zero-pad the expand
+        output before running the DW layer.
+        """
+        C, H, W = self.feature_map.shape
+
+        # Find the depthwise layer (the only spatial layer in the block)
+        dw_layer = None
+        for layer in block.layers:
+            if layer.type == LayerType.DEPTHWISE:
+                dw_layer = layer
+                break
+
+        if dw_layer is None:
+            # No spatial layer — shouldn't happen for multi-layer blocks, fall back
+            logger.warning(f"[Coordinator]: Block [{block.start_idx}-{block.end_idx}] has no DW layer, falling back to single-layer mode")
+            for layer, qp in zip(block.layers, block.quant_params):
+                self.current_layer_idx = layer.layer_idx
+                await self._run_layer(layer, qp)
+            return
+
+        dw_padding = dw_layer.padding
+        dw_kernel = dw_layer.kernel_size
+        dw_stride = dw_layer.stride
+
+        # Block output spatial dims (DW determines spatial transform; project is 1×1)
+        H_out = (H + 2 * dw_padding - dw_kernel) // dw_stride + 1
+        W_out = (W + 2 * dw_padding - dw_kernel) // dw_stride + 1
+
+        # Pad block input for DW receptive field (both height and width)
+        first_qp = block.quant_params[0]
+        if dw_padding > 0:
+            padded = np.pad(
+                self.feature_map,
+                ((0, 0), (dw_padding, dw_padding), (dw_padding, dw_padding)),
+                mode='constant',
+                constant_values=first_qp.z_in
+            )
+        else:
+            padded = self.feature_map
+
+        # Block's final output channels
+        out_channels = block.layers[-1].out_channels
+
+        # Split output rows across workers
+        available_workers = list(self.worker_manager.workers.values())
+        num_workers = len(available_workers)
+        rows_per_worker = int(np.ceil(H_out / num_workers))
+
+        tasks = []
+        for i, worker in enumerate(available_workers):
+            out_start = i * rows_per_worker
+            out_end = min(out_start + rows_per_worker, H_out)
+            if out_start >= H_out:
+                continue
+
+            # Map output rows → padded input rows
+            # DW: out_row r needs padded input rows [r*stride, r*stride + kernel)
+            in_start_y = out_start * dw_stride
+            in_end_y = (out_end - 1) * dw_stride + dw_kernel
+
+            input_patch = padded[:, in_start_y:in_end_y, :]
+
+            task_msg = TaskMessage(
+                layer_type=block.layers[0].type,
+                layer_idx=block.start_idx,
+                end_layer_idx=block.end_idx,
+                in_channels=block.layers[0].in_channels,
+                in_h=input_patch.shape[1],
+                in_w=input_patch.shape[2],
+                out_channels=out_channels,
+                out_h=out_end - out_start,
+                out_w=W_out,
+                kernel_size=block.layers[0].kernel_size,
+                stride=block.layers[0].stride,
+                padding=0,  # padding already applied by coordinator
+                groups=block.layers[0].groups,
+                in_features=0,
+                out_features=0,
+                input_size=input_patch.size
+            )
+
+            task = asyncio.create_task(
+                self._send_task_to_worker(worker, task_msg, input_patch)
+            )
+            tasks.append((worker, out_start, out_end, task))
+            logger.debug(
+                f"[Coordinator]: Block [{block.start_idx}-{block.end_idx}] "
+                f"assigned output rows {out_start}-{out_end} to worker {worker.worker_id}, "
+                f"input patch shape {input_patch.shape}"
+            )
+
+        await asyncio.gather(*[t[3] for t in tasks])
+        output_shape = (out_channels, H_out, W_out)
+        self.feature_map = await self._collect_results(tasks, output_shape)
     
 
     async def _distribute_conv(self, layer: LayerConfig, quant_params: QuantParams):
@@ -253,6 +428,7 @@ class Coordinator:
             task_msg = TaskMessage(
                 layer_type=layer.type,
                 layer_idx=self.current_layer_idx,
+                end_layer_idx=self.current_layer_idx,  # single layer
                 in_channels=layer.in_channels,
                 in_h=input_patch.shape[1],
                 in_w=input_patch.shape[2],
@@ -301,6 +477,7 @@ class Coordinator:
             task_msg = TaskMessage(
                 layer_type=layer.type,
                 layer_idx=self.current_layer_idx,
+                end_layer_idx=self.current_layer_idx,  # single layer
                 in_channels=layer.in_channels,
                 in_h=1,
                 in_w=1,
@@ -494,6 +671,62 @@ class Coordinator:
             await self.worker_manager.send_message(worker, MessageType.SHUTDOWN, shutdown_msg)
         #  await self.worker_manager.send_message(worker, MessageType.TASK, task_msg.pack() + input_patch.tobytes())
 
+    def _group_layers_into_blocks(self) -> list[BlockConfig]:
+        """Group consecutive layers into blocks for block-level execution.
+
+        Recognises two patterns:
+          • 3-layer block: expand (1×1 conv) → depthwise (3×3) → project (1×1 conv)
+          • 2-layer block: depthwise (3×3) → project (1×1 conv)   (e.g. blk0)
+        Everything else becomes a single-layer block.
+        """
+        blocks: list[BlockConfig] = []
+        layers = self.layer_config_list
+        qps = self.quant_params_list
+        i = 0
+
+        while i < len(layers):
+            # ── Try 3-layer inverted-residual block ──
+            if (i + 2 < len(layers)
+                and layers[i].type in (LayerType.CONV, LayerType.POINTWISE)
+                and layers[i].kernel_size == 1
+                and layers[i+1].type == LayerType.DEPTHWISE
+                and layers[i+2].type in (LayerType.CONV, LayerType.POINTWISE)
+                and layers[i+2].kernel_size == 1):
+
+                res_cache = layers[i].residual_add_to
+                res_connect = layers[i+2].residual_connect_from
+
+                blocks.append(BlockConfig(
+                    start_idx=i, end_idx=i + 2,
+                    layers=layers[i:i+3], quant_params=qps[i:i+3],
+                    residual_cache_name=res_cache,
+                    residual_connect_name=res_connect,
+                ))
+                i += 3
+                continue
+
+            # ── Try 2-layer block: dw + proj ──
+            if (i + 1 < len(layers)
+                and layers[i].type == LayerType.DEPTHWISE
+                and layers[i+1].type in (LayerType.CONV, LayerType.POINTWISE)
+                and layers[i+1].kernel_size == 1):
+
+                blocks.append(BlockConfig(
+                    start_idx=i, end_idx=i + 1,
+                    layers=layers[i:i+2], quant_params=qps[i:i+2],
+                ))
+                i += 2
+                continue
+
+            # ── Single layer (init_conv, final_conv, fc_final, etc.) ──
+            blocks.append(BlockConfig(
+                start_idx=i, end_idx=i,
+                layers=[layers[i]], quant_params=[qps[i]],
+            ))
+            i += 1
+
+        return blocks
+
 
     def _parse_layer_configs(self, json_path: str = './src/model_config.json'):
         with open(json_path, 'r') as f:
@@ -550,10 +783,10 @@ class Coordinator:
     def print_stats(self):
         logger.info(f"[Coordinator]: Inference execution stats:")
         for s in self.stats:
+            idx_str = str(s['layer_idx'])
             logger.info(
-                f"Layer {s['layer_idx']:>3} [{s['layer_type']:>8}] {s['layer_name']}: "
+                f"Layer {idx_str:>5} [{s['layer_type']:>8}] {s['layer_name']}: "
                 f"total={s['total_time_ms']:.2f}ms  "
                 f"compute={s.get('avg_compute_ms', 0):.2f}ms  "
                 f"compress={s.get('avg_compress_ms', 0):.2f}ms"
-                # f"comm={s.get('avg_comm_ms', 0):.2f}ms"
             )
