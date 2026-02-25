@@ -66,39 +66,39 @@ void native_conv2d(const uint8_t *input, const int8_t *weights, const int32_t *b
                 output[o_idx] = (uint8_t) max( 0, min(255, (int32_t) roundf(acc_float) ) );      
             }
         }
-#ifdef DEBUG
+// #ifdef DEBUG
 
-        if (cfg->output_channels == 32 && oc == 1) {
-            // first print input channels first 3x3 patch for debug
-            Serial.printf("Input: \n");
-            for (size_t ic = 0; ic < cfg->input_channels; ++ic) {
-                Serial.printf("Input channel %d: \n", ic);
-                for (size_t ih = 0; ih < 3; ++ih) {
-                    for (size_t iw = 0; iw < 3; ++iw) {
-                        Serial.printf("%d ", input[ic * in_h * in_w + ih * in_w + iw]);
-                    }
-                    Serial.println();
-                }
-            }
-            Serial.printf("Weight: \n"); // only print weights for output channel 1 for debug
-            for (size_t ic = 0; ic < cfg->input_channels; ++ic) {
-                Serial.printf("Weight for input channel %d: \n", ic);
-                for (size_t kh = 0; kh < cfg->kernel_size; ++kh) {
-                    for (size_t kw = 0; kw < cfg->kernel_size; ++kw) {
-                        Serial.printf("%d ", weights[oc * cfg->input_channels * cfg->kernel_size * cfg->kernel_size +
-                                                        ic * cfg->kernel_size * cfg->kernel_size +
-                                                        kh * cfg->kernel_size + kw]);
-                    }
-                    Serial.println();
-                }
-            }
-            // corresponding output value for debug
-            Serial.printf("Output value for output channel %d: %d\n", oc, output[oc * out_h * out_w + 0 * out_w + 0]);
-            // Serial.printf("Output channel %d: ", oc); // print channel 1
+//         if (cfg->output_channels == 32 && oc == 1) {
+//             // first print input channels first 3x3 patch for debug
+//             Serial.printf("Input: \n");
+//             for (size_t ic = 0; ic < cfg->input_channels; ++ic) {
+//                 Serial.printf("Input channel %d: \n", ic);
+//                 for (size_t ih = 0; ih < 3; ++ih) {
+//                     for (size_t iw = 0; iw < 3; ++iw) {
+//                         Serial.printf("%d ", input[ic * in_h * in_w + ih * in_w + iw]);
+//                     }
+//                     Serial.println();
+//                 }
+//             }
+//             Serial.printf("Weight: \n"); // only print weights for output channel 1 for debug
+//             for (size_t ic = 0; ic < cfg->input_channels; ++ic) {
+//                 Serial.printf("Weight for input channel %d: \n", ic);
+//                 for (size_t kh = 0; kh < cfg->kernel_size; ++kh) {
+//                     for (size_t kw = 0; kw < cfg->kernel_size; ++kw) {
+//                         Serial.printf("%d ", weights[oc * cfg->input_channels * cfg->kernel_size * cfg->kernel_size +
+//                                                         ic * cfg->kernel_size * cfg->kernel_size +
+//                                                         kh * cfg->kernel_size + kw]);
+//                     }
+//                     Serial.println();
+//                 }
+//             }
+//             // corresponding output value for debug
+//             Serial.printf("Output value for output channel %d: %d\n", oc, output[oc * out_h * out_w + 0 * out_w + 0]);
+//             // Serial.printf("Output channel %d: ", oc); // print channel 1
             
-            Serial.println();
-        }
-#endif
+//             Serial.println();
+//         }
+// #endif
 
     }
 }
