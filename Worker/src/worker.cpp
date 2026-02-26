@@ -208,7 +208,7 @@ void Worker::HandleComputing() {
 #endif
 
     // Block mode: multiple consecutive layers
-    if (current_task_.end_layer_idx > current_task_.layer_idx) {
+    if (current_task_.end_layer_idx >= current_task_.layer_idx) {
         HandleBlockComputing();
         return;
     }
@@ -220,6 +220,17 @@ void Worker::HandleComputing() {
     const int8_t *weights = model_weights[layer_idx].weights;
     const int32_t *bias = model_weights[layer_idx].bias;
     uint8_t *output = output_buffer_;
+
+#ifdef DEBUG
+    // Memory tracker: single layer → layer_in_block = 0, src=RAM1, dst=RAM2
+    mem_tracker_.Reset(sizeof(input_buffer_), sizeof(output_buffer_));
+    uint32_t input_data_bytes  = current_task_.in_channels * current_task_.in_h * current_task_.in_w;
+    uint32_t output_data_bytes = current_task_.out_channels * current_task_.out_h * current_task_.out_w;
+    mem_tracker_.RecordBeforeLayer(0, layer_idx, input_data_bytes, output_data_bytes,
+                                   model_weights[layer_idx].weights_size);
+    uint32_t *paint_base = mem::paintStackRegion();
+#endif
+
     uint32_t task_start_time = micros();
     switch (current_task_.layer_type) {
         case LayerType::CONV:
@@ -244,6 +255,13 @@ void Worker::HandleComputing() {
     }
     // TODO check if we need ReLU6 here; QuantWorker doesn't have it
     uint32_t task_elapsed_time = micros() - task_start_time;
+
+#ifdef DEBUG
+    uint32_t stack_peak = mem::checkStackWaterMark(paint_base);
+    mem_tracker_.RecordAfterLayer(0, stack_peak);
+    mem_tracker_.PrintReport();
+#endif
+
     if (!success) {
         Serial.println("Invalid layer type in task");
         SendError(ErrorCode::ERR_INVALID_TASK, "Invalid layer type in task");
@@ -281,7 +299,8 @@ void Worker::HandleBlockComputing() {
     uint32_t end_idx = current_task_.end_layer_idx;
 
 #ifdef DEBUG
-    Serial.printf("Worker %d block computing layers %u -> %u\n", worker_id_, start_idx, end_idx);
+    // Serial.printf("Worker %d block computing layers %u -> %u\n", worker_id_, start_idx, end_idx);
+    mem_tracker_.Reset(sizeof(input_buffer_), sizeof(output_buffer_));
 #endif
 
     uint8_t *src = input_buffer_;
@@ -296,10 +315,31 @@ void Worker::HandleBlockComputing() {
         const int8_t *weights = model_weights[idx].weights;
         const int32_t *bias = model_weights[idx].bias;
 
+#ifdef DEBUG
+        uint32_t out_h, out_w;
+        bool is_depthwise = (cfg->input_channels == cfg->output_channels && cfg->kernel_size > 1);
+        if (is_depthwise) {
+            uint8_t pt = current_task_.block_pad_top;
+            uint8_t pb = current_task_.block_pad_bottom;
+            uint8_t pl = cfg->padding;
+            uint8_t pr = cfg->padding;
+            out_h = (cur_h + pt + pb - cfg->kernel_size) / cfg->stride + 1;
+            out_w = (cur_w + pl + pr - cfg->kernel_size) / cfg->stride + 1;
+        } else {
+            out_h = (cur_h - cfg->kernel_size) / cfg->stride + 1;
+            out_w = (cur_w - cfg->kernel_size) / cfg->stride + 1;
+        }
+
+        uint32_t input_data_bytes  = cfg->input_channels * cur_h * cur_w;
+        uint32_t output_data_bytes = cfg->output_channels * out_h * out_w;
+        mem_tracker_.RecordBeforeLayer(idx - start_idx, idx, input_data_bytes, output_data_bytes, model_weights[idx].weights_size);
+        uint32_t *paint_base = mem::paintStackRegion();
+#endif
+
         uint32_t t0 = micros();
 
         // Infer layer type from config: depthwise has in_channels == out_channels and kernel > 1
-        bool is_depthwise = (cfg->input_channels == cfg->output_channels && cfg->kernel_size > 1);
+        // bool is_depthwise = (cfg->input_channels == cfg->output_channels && cfg->kernel_size > 1);
         if (is_depthwise) {
             // Worker-side DW padding: use block_pad_top/bottom for height,
             // cfg->padding for width.  The padded DW kernel handles padding
@@ -319,12 +359,13 @@ void Worker::HandleBlockComputing() {
             cur_h = (cur_h - cfg->kernel_size) / cfg->stride + 1;
             cur_w = (cur_w - cfg->kernel_size) / cfg->stride + 1;
         }
-
         total_compute_us += micros() - t0;
 
 #ifdef DEBUG
-        Serial.printf("  Layer %u (%s): -> %ux%u\n",
-                      idx, cfg->name, cur_h, cur_w);
+        // Serial.printf("  Layer %u (%s): -> %ux%u\n",
+        //               idx, cfg->name, cur_h, cur_w);
+        uint32_t stack_peak = mem::checkStackWaterMark(paint_base);
+        mem_tracker_.RecordAfterLayer(idx - start_idx, stack_peak);
 #endif
 
         // Ping-pong: swap src and dst
@@ -345,8 +386,10 @@ void Worker::HandleBlockComputing() {
     }
 
 #ifdef DEBUG
-    Serial.printf("Worker %d block done: %u layers, output %u bytes, compute %u us\n",
-                  worker_id_, num_layers, output_size, total_compute_us);
+    // Serial.printf("Worker %d block done: %u layers, output %u bytes, compute %u us\n",
+    //               worker_id_, num_layers, output_size, total_compute_us);
+
+    mem_tracker_.PrintReport();
 #endif
 
     current_result_.compute_time_us = total_compute_us;

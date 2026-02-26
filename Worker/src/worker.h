@@ -5,6 +5,7 @@
 #include <NativeEthernet.h>
 
 #include "protocol.h"
+#include "memory_tracker.h"
 
 class Worker final {
 public:
@@ -55,6 +56,9 @@ private:
 
     static uint8_t input_buffer_[350 * 1024];
     static uint8_t output_buffer_[350 * 1024];
+
+    // for memory tracking
+    mem::MemoryTracker mem_tracker_;
 };
 
 #endif // WORKER_H
