@@ -51,7 +51,20 @@ class TaskDistributor:
         H_out = (H + 2 * layer.padding - layer.kernel_size) // layer.stride + 1
         W_out = (W + 2 * layer.padding - layer.kernel_size) // layer.stride + 1
 
-        if layer.padding > 0:
+        is_depthwise = (layer.type == LayerType.DEPTHWISE)
+
+        if is_depthwise and layer.padding > 0:
+            # DW layers: pad height only.  The worker always enters
+            # HandleBlockComputing which calls depthwise_conv2d_padded with
+            # pl=pr=cfg->padding for width.  Pre-padding width here would
+            # cause double-padding.
+            padded = np.pad(
+                feature_map,
+                ((0, 0), (layer.padding, layer.padding), (0, 0)),
+                mode='constant',
+                constant_values=quant_params.z_in,
+            )
+        elif layer.padding > 0:
             padded = np.pad(
                 feature_map,
                 ((0, 0), (layer.padding, layer.padding), (layer.padding, layer.padding)),

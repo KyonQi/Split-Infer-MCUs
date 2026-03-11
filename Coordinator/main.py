@@ -80,8 +80,8 @@ async def main(config: CoordinatorConfig):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Coordinator for distributed DNN inference")
     parser.add_argument('--workers', type=int, default=4, help='Number of workers')
-    parser.add_argument('--mode', type=str, choices=['block', 'layer'], default='block',
-                        help='Execution mode: block (fused layers) or layer (per-layer)')
+    parser.add_argument('--mode', type=str, choices=['block', 'layer', 'hybrid'], default='block',
+                        help='Execution mode: block (fused layers), layer (per-layer), or hybrid (adaptive)')
     parser.add_argument('--model-config', type=str, default='./src/model_config.json',
                         help='Path to model config JSON')
     parser.add_argument('--host', type=str, default='192.168.1.10',

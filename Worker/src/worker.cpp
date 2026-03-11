@@ -259,7 +259,8 @@ void Worker::HandleComputing() {
 #ifdef DEBUG
     uint32_t stack_peak = mem::checkStackWaterMark(paint_base);
     mem_tracker_.RecordAfterLayer(0, stack_peak);
-    mem_tracker_.PrintReport();
+    // mem_tracker_.PrintReport();
+    mem_tracker_.PrintLayerDetail();
 #endif
 
     if (!success) {
@@ -389,7 +390,8 @@ void Worker::HandleBlockComputing() {
     // Serial.printf("Worker %d block done: %u layers, output %u bytes, compute %u us\n",
     //               worker_id_, num_layers, output_size, total_compute_us);
 
-    mem_tracker_.PrintReport();
+    // mem_tracker_.PrintReport();
+    mem_tracker_.PrintLayerDetail();
 #endif
 
     current_result_.compute_time_us = total_compute_us;
