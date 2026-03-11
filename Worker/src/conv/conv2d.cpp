@@ -103,6 +103,75 @@ void native_conv2d(const uint8_t *input, const int8_t *weights, const int32_t *b
     }
 }
 
+void native_conv2d_padded(const uint8_t *input, const int8_t *weights, const int32_t *bias, 
+                    uint8_t *output, const LayerConfig *cfg, const QuantParams *qp,
+                    const uint8_t in_h, const uint8_t in_w,
+                    uint8_t pad_top, uint8_t pad_bottom, uint8_t pad_left, uint8_t pad_right) {
+    // native convolution implementation for testing
+    // const int in_h = 4, in_w = 4;
+    // const int out_h = (in_h + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+    // const int out_w = (in_w + 2 * cfg->padding - cfg->kernel_size) / cfg->stride + 1;
+    
+    // const int out_h = (in_h - cfg->kernel_size) / cfg->stride + 1;
+    // const int out_w = (in_w - cfg->kernel_size) / cfg->stride + 1;
+
+    const int out_h = (in_h + pad_top + pad_bottom - cfg->kernel_size) / cfg->stride + 1;
+    const int out_w = (in_w + pad_left + pad_right - cfg->kernel_size) / cfg->stride + 1;
+
+    for (size_t oc = 0; oc < cfg->output_channels; ++oc) {
+        int32_t bias_val = bias[oc];
+        float weight_scale = qp->weight_scales[oc];
+        int weight_zero_point = qp->weight_zps[oc]; // must be 0
+        float multiplier = (qp->input_scale * weight_scale) / qp->output_scale;
+
+        for (size_t oh = 0; oh < out_h; ++oh) {
+            for (size_t ow = 0; ow < out_w; ++ow) {
+                int32_t acc = bias_val;
+
+                // int start_y = oh * cfg->stride - cfg->padding; // input y coordinate corresponding to output (oh, ow)
+                // int start_x = ow * cfg->stride - cfg->padding; // input x coordinate corresponding to output (oh, ow)
+
+                int start_y = (int)oh * cfg->stride - pad_top; // input y coordinate corresponding to output (oh, ow)
+                int start_x = (int)ow * cfg->stride - pad_left; // input x coordinate corresponding to output (oh, ow)
+
+                // int start_y = oh * cfg->stride; // input y coordinate corresponding to output (oh, ow)
+                // int start_x = ow * cfg->stride; // input x coordinate corresponding to output (oh, ow)
+
+                for (size_t ic = 0; ic < cfg->input_channels; ++ic) {
+                    for (size_t kh = 0; kh < cfg->kernel_size; ++kh) {
+                        for (size_t kw = 0; kw < cfg->kernel_size; ++kw) {
+                            int in_y = start_y + kh;
+                            int in_x = start_x + kw;
+
+                            // Check for valid input coordinates (handle padding)
+                            if (in_y >= 0 && in_y < in_h && in_x >= 0 && in_x < in_w) {
+                                int32_t input_val = (int32_t) input[ic * in_h * in_w + in_y * in_w + in_x] - qp->input_zero_point;
+                                int32_t weight_val = (int32_t) weights[oc * cfg->input_channels * cfg->kernel_size * cfg->kernel_size +
+                                                            ic * cfg->kernel_size * cfg->kernel_size +
+                                                            kh * cfg->kernel_size + kw] - weight_zero_point;
+                                acc += input_val * weight_val;
+                            }
+                        }
+                    }
+                }
+
+                // requantize
+                float acc_float = acc * multiplier + qp->output_zero_point;
+
+#ifdef DEBUG
+                if (oc == 1 && oh == 0 && ow == 0) {
+                    Serial.printf("acc: %d, multiplier: %f, output_zero_point: %d, acc_float: %f\n", acc, multiplier, qp->output_zero_point, acc_float);
+                    Serial.flush();
+                }
+#endif
+                int o_idx = oc * out_h * out_w + oh * out_w + ow;
+                output[o_idx] = (uint8_t) max( 0, min(255, (int32_t) roundf(acc_float) ) );      
+            }
+        }
+    }
+}
+
+
 // Im2Col + GeMM implementations
 // 1. input -> im2col buffer : [in_c, in_h, in_w] -> [in_c * kernel_h * kernel_w, out_h * out_w]
 // 2. weight -> weight buffer : [out_c, in_c, kernel_h, kernel_w] -> [out_c, in_c * kernel_h * kernel_w]

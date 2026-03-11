@@ -51,29 +51,6 @@ class TaskDistributor:
         H_out = (H + 2 * layer.padding - layer.kernel_size) // layer.stride + 1
         W_out = (W + 2 * layer.padding - layer.kernel_size) // layer.stride + 1
 
-        is_depthwise = (layer.type == LayerType.DEPTHWISE)
-
-        if is_depthwise and layer.padding > 0:
-            # DW layers: pad height only.  The worker always enters
-            # HandleBlockComputing which calls depthwise_conv2d_padded with
-            # pl=pr=cfg->padding for width.  Pre-padding width here would
-            # cause double-padding.
-            padded = np.pad(
-                feature_map,
-                ((0, 0), (layer.padding, layer.padding), (0, 0)),
-                mode='constant',
-                constant_values=quant_params.z_in,
-            )
-        elif layer.padding > 0:
-            padded = np.pad(
-                feature_map,
-                ((0, 0), (layer.padding, layer.padding), (layer.padding, layer.padding)),
-                mode='constant',
-                constant_values=quant_params.z_in,
-            )
-        else:
-            padded = feature_map
-
         available_workers = list(self.worker_manager.workers.values())
         num_workers = len(available_workers)
         rows_per_worker = int(np.ceil(H_out / num_workers))
@@ -85,9 +62,16 @@ class TaskDistributor:
             if start_row >= H_out:
                 continue
 
-            in_start_y = start_row * layer.stride
-            in_end_y = (end_row - 1) * layer.stride + layer.kernel_size
-            input_patch = padded[:, in_start_y:in_end_y, :]
+            in_start_y_raw = start_row * layer.stride - layer.padding
+            in_end_y_raw = (end_row - 1) * layer.stride + layer.kernel_size - layer.padding
+
+            in_start_y = max(0, in_start_y_raw)
+            in_end_y = min(H, in_end_y_raw)
+
+            pad_top = in_start_y - in_start_y_raw
+            pad_bottom = in_end_y_raw - in_end_y
+
+            input_patch = feature_map[:, in_start_y:in_end_y, :]
 
             task_msg = TaskMessage(
                 layer_type=layer.type,
@@ -106,6 +90,8 @@ class TaskDistributor:
                 in_features=0,
                 out_features=0,
                 input_size=input_patch.size,
+                block_pad_top=pad_top,
+                block_pad_bottom=pad_bottom,
             )
 
             task = asyncio.create_task(self._send_task_to_worker(worker, task_msg, input_patch, current_layer_idx))
