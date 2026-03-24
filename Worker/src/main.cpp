@@ -24,7 +24,7 @@ void setup() {
 
 void loop() {
     worker.Loop();
-    delay(10); // avoid busy loop, adjust as needed
+    // delay(1); // avoid busy loop, adjust as needed
     // static uint32_t last_heartbeat = 0;
     // if (millis() - last_heartbeat > 5000) {
     //     Serial.print(".");

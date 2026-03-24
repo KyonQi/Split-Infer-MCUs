@@ -376,6 +376,61 @@ void depthwise_conv2d_padded(const uint8_t *input, const int8_t *weights, const 
     }
 }
 
+// pointwise conv (1x1)
+// 1. transpose input CHW -> HWC for better memory access pattern in pointwise conv ( TODO can we do this with O(1) memory usage??)
+// 2. per output pixel: arm_dot_prod_q15 on contiguous in_c elements
+// 
+// workspace layout (caller provides):
+//   [input_q15 : hw * in_c * sizeof(q15_t)]
+//   [weight_row: in_c * sizeof(q15_t)     ]
+void pointwise_conv2d(const uint8_t *input, const int8_t *weights, const int32_t *bias, 
+                        uint8_t *output, const LayerConfig *cfg, const QuantParams *qp, const uint8_t in_h, const uint8_t in_w,
+                        uint8_t *workspace, uint32_t workspace_size) 
+{
+    assert(cfg->kernel_size == 1);
+
+    const uint32_t in_c = cfg->input_channels;
+    const uint32_t out_c = cfg->output_channels;
+    const uint32_t hw = in_h * in_w;
+    const int32_t z_in = qp->input_zero_point;
+
+    assert(workspace_size >= (hw * in_c + in_c) * sizeof(q15_t)); // check workspace size
+
+    q15_t *input_q15 = reinterpret_cast<q15_t *>(workspace);
+    q15_t *weight_row = input_q15 + hw * in_c;
+
+    // 1. transpose input CHW -> HWC and convert to q15_t with zero-point correction
+    for (uint32_t p = 0; p < hw; ++p) {
+        q15_t *dst_row = input_q15 + p * in_c;
+        for (uint32_t c = 0; c < in_c; ++c) {
+            dst_row[c] = (q15_t) ((int32_t) input[c * hw + p] - z_in);
+        }
+    }
+
+    // 2. for each output pixel, compute dot product with corresponding weights
+    for (uint32_t oc = 0; oc < out_c; ++oc) {
+        const int32_t w_zp = qp->weight_zps[oc];
+        const int8_t *w_src = weights + oc * in_c; // pointwise conv weights are already in [out_c, in_c] layout
+        for (uint32_t ic = 0; ic < in_c; ++ic) {
+            weight_row[ic] = (q15_t) ((int32_t) w_src[ic] - w_zp);
+        }
+
+        const float multiplier = (qp->input_scale * qp->weight_scales[oc]) / qp->output_scale;
+        const int32_t bias_val = bias[oc];
+        const int32_t out_zp = qp->output_zero_point;
+        uint8_t *out_ch = output + oc * hw;
+
+        for (uint32_t p = 0; p < hw; ++p) {
+            q63_t dot = 0;
+            arm_dot_prod_q15(weight_row, input_q15 + p * in_c, in_c, &dot);
+
+            int32_t acc = (int32_t) dot + bias_val;
+            float acc_float = acc * multiplier + out_zp;
+            out_ch[p] = (uint8_t) max( 0, min(255, (int32_t) roundf(acc_float) ) );
+        }
+    }
+}
+
 
     
 } // namespace conv2d

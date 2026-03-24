@@ -318,6 +318,7 @@ void Worker::HandleBlockComputing() {
 
         // Infer layer type from config: depthwise has in_channels == out_channels and kernel > 1
         bool is_depthwise = (cfg->input_channels == cfg->output_channels && cfg->kernel_size > 1);
+        bool is_pointwise = (cfg->kernel_size == 1);
 
 #ifdef DEBUG
         uint32_t out_h, out_w;
@@ -361,6 +362,37 @@ void Worker::HandleBlockComputing() {
                                      cur_h, cur_w, pt, pb, pl, pr);
             cur_h = (cur_h + pt + pb - cfg->kernel_size) / cfg->stride + 1;
             cur_w = (cur_w + pl + pr - cfg->kernel_size) / cfg->stride + 1;
+        } else if (is_pointwise) {
+            uint32_t out_size = cfg->output_channels * cur_h * cur_w;
+            uint8_t *workspace = dst + out_size; // use dst tail as workspace, assuming it's large enough for pointwise conv
+            uint32_t workspace_size = sizeof(output_buffer_) - out_size;
+            
+            if (workspace_size < (cur_h * cur_w + 1) * cfg->input_channels) {
+#ifdef DEBUG
+                Serial.println("Not enough workspace for pointwise convolution, back to native conv2d without workspace");
+#endif
+                // Single-layer task: coordinator computed per-worker H padding
+                // Multi-layer block: non-DW layers (expand/project 1x1) use cfg->padding (= 0)
+                uint8_t pt = (start_idx == end_idx) ? current_task_.block_pad_top : cfg->padding;
+                uint8_t pb = (start_idx == end_idx) ? current_task_.block_pad_bottom : cfg->padding;
+                uint8_t pl = cfg->padding;
+                uint8_t pr = cfg->padding;
+                conv2d::native_conv2d_padded(src, weights, bias, dst,
+                                        cfg, &model_quant_params[idx],
+                                        cur_h, cur_w, pt, pb, pl, pr);
+
+                cur_h = (cur_h + pt + pb - cfg->kernel_size) / cfg->stride + 1;
+                cur_w = (cur_w + pl + pr - cfg->kernel_size) / cfg->stride + 1;
+            } else {
+                conv2d::pointwise_conv2d(src, weights, bias, dst,
+                                        cfg, &model_quant_params[idx], cur_h, cur_w,
+                                        workspace, workspace_size);                
+            }
+
+            // conv2d::pointwise_conv2d(src, weights, bias, dst,
+            //                         cfg, &model_quant_params[idx], cur_h, cur_w,
+            //                         workspace, workspace_size);
+             // pointwise conv does not change H/W
         } else {
             // Single-layer task: coordinator computed per-worker H padding
             // Multi-layer block: non-DW layers (expand/project 1x1) use cfg->padding (= 0)

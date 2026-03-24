@@ -30,6 +30,11 @@ namespace conv2d {
                         const uint8_t in_h, const uint8_t in_w,
                         uint8_t pad_top, uint8_t pad_bottom, uint8_t pad_left, uint8_t pad_right);
 
+    // pointwise conv (1x1)
+    void pointwise_conv2d(const uint8_t *input, const int8_t *weights, const int32_t *bias, 
+                        uint8_t *output, const LayerConfig *cfg, const QuantParams *qp, const uint8_t in_h, const uint8_t in_w,
+                        uint8_t *workspace, uint32_t workspace_size);
+
     // void depthwise_conv2d_dsp(const uint8_t *input, const int8_t *weights, const int32_t *bias, 
     //                     uint8_t *output, const LayerConfig *cfg, const QuantParams *qp, const uint8_t in_h, const uint8_t in_w);
 

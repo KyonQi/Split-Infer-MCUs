@@ -31,7 +31,7 @@ def setup_logging(log_level: str):
 def prepocess_image(image_path: str) -> np.ndarray:
     prepocess = transforms.Compose([
         transforms.Resize(256),
-        transforms.CenterCrop(224),
+        transforms.CenterCrop(224), # mcunet-in4 is 160
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
