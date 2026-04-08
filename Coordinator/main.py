@@ -59,6 +59,8 @@ async def main(config: CoordinatorConfig):
         input_image_path = Path("./data/panda.jpg")
         input_image = prepocess_image(str(input_image_path))
         labels = load_imagenet_labels("./data/imagenet_labels.json")
+        
+        # input_image = np.load("./data/test_stop.npz")['mfccs'][0]  # example for MFCC input
         # input_image = np.random.rand(3, 224, 224).astype(np.float32)
         output = await coord.execute_inference(input_image)
         logger.debug(f"Inference output: {output}")
@@ -80,7 +82,7 @@ async def main(config: CoordinatorConfig):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Coordinator for distributed DNN inference")
     parser.add_argument('--workers', type=int, default=4, help='Number of workers')
-    parser.add_argument('--mode', type=str, choices=['block', 'layer', 'hybrid'], default='block',
+    parser.add_argument('--mode', type=str, choices=['block', 'layer', 'hybrid', 'mnasnet_block', 'mnasnet_hybrid'], default='block',
                         help='Execution mode: block (fused layers), layer (per-layer), or hybrid (adaptive)')
     parser.add_argument('--model-config', type=str, default='./src/model_config.json',
                         help='Path to model config JSON')

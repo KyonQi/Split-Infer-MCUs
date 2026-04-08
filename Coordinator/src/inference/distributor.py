@@ -111,7 +111,7 @@ class TaskDistributor:
         total_classes = layer.out_channels
         available_workers = list(self.worker_manager.workers.values())
         num_workers = len(available_workers)
-        classes_per_worker = int(np.ceil(total_classes / num_workers))
+        classes_per_worker = total_classes // num_workers
 
         logger.debug(
             f"[Distributor]: Distributing FC layer {layer.name} with {total_classes} classes across {num_workers} workers"
@@ -120,7 +120,8 @@ class TaskDistributor:
         tasks: list[tuple[WorkerInfo, int, int, asyncio.Task]] = []
         for i, worker in enumerate(available_workers):
             start_cls = worker.worker_id * classes_per_worker
-            end_cls = min(start_cls + classes_per_worker, total_classes)
+            # Last worker gets the remainder so every class is covered
+            end_cls = total_classes if worker.worker_id == num_workers - 1 else start_cls + classes_per_worker
             if start_cls >= total_classes:
                 continue
 
