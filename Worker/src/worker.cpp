@@ -42,29 +42,29 @@ void Worker::Begin() {
 
 void Worker::Loop() {
     switch (state_) {
-    case WorkerState::DISCONNECTED:
-        HandleDisconnected();
-        break;
-    case WorkerState::CONNECTING:
-        HandleConnecting();
-        break;
-    case WorkerState::REGISTERING:
-        HandleRegistering();
-        break;
-    case WorkerState::IDLE:
-        HandleIdle();
-        break;
-    case WorkerState::RECEIVING_TASK:
-        HandleReceivingTask();
-        break;
-    case WorkerState::COMPUTING:
-        HandleComputing();
-        break;
-    case WorkerState::SENDING_RESULT:
-        HandleSendingResult();
-        break;
-    default:
-        break;
+        case WorkerState::DISCONNECTED:
+            HandleDisconnected();
+            break;
+        case WorkerState::CONNECTING:
+            HandleConnecting();
+            break;
+        case WorkerState::REGISTERING:
+            HandleRegistering();
+            break;
+        case WorkerState::IDLE:
+            HandleIdle();
+            break;
+        case WorkerState::RECEIVING_TASK:
+            HandleReceivingTask();
+            break;
+        case WorkerState::COMPUTING:
+            HandleComputing();
+            break;
+        case WorkerState::SENDING_RESULT:
+            HandleSendingResult();
+            break;
+        default:
+            break;
     }
 }
 
@@ -367,7 +367,7 @@ void Worker::HandleBlockComputing() {
             uint8_t *workspace = dst + out_size; // use dst tail as workspace, assuming it's large enough for pointwise conv
             uint32_t workspace_size = sizeof(output_buffer_) - out_size;
             
-            if (workspace_size < (cur_h * cur_w + 1) * cfg->input_channels) {
+            if (workspace_size < (cur_h * cur_w + 1) * cfg->input_channels * 2) { // x2: pointwise workspace uses q15_t (2 bytes)
 #ifdef DEBUG
                 Serial.println("Not enough workspace for pointwise convolution, back to native conv2d without workspace");
 #endif
