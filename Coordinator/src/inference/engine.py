@@ -42,6 +42,11 @@ class InferenceEngine:
 
         # Needed for residual requantization (set before execute())
         self.quant_params_list: list[QuantParams] = []
+        
+        # Halo reuse
+        self.use_halo = True
+        self._prev_worker_rows: list[tuple[int, int]] | None = None
+        self._prev_block_end_idx: int | None = None
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -63,6 +68,10 @@ class InferenceEngine:
         self.feature_map = quantized_input
         self.quant_params_list = qps
         self.residual_buffers.clear()
+        # reset halo reuse state
+        self._prev_worker_rows = None
+        self._prev_block_end_idx = None
+
 
         logger.info(
             f"[Engine]: Starting inference — {len(layers)} layers in {len(blocks)} blocks, "
@@ -139,7 +148,7 @@ class InferenceEngine:
     # ------------------------------------------------------------------
     # Layer / block runners
     # ------------------------------------------------------------------
-
+    
     async def _run_layer(self, layer: LayerConfig, quant_params: QuantParams) -> None:
         # Cache residual if requested
         if layer.residual_add_to:
@@ -166,14 +175,28 @@ class InferenceEngine:
             self.feature_map = await self.distributor.distribute_fc(
                 self.feature_map, layer, quant_params, self.current_layer_idx
             )
+            new_worker_rows = None  # FC has no spatial halo
         else:
-            self.feature_map = await self.distributor.distribute_conv(
-                self.feature_map, layer, quant_params, self.current_layer_idx
+            halo_state = None
+            if self.use_halo and self._prev_block_end_idx is not None:
+                halo_state = (self._prev_worker_rows, self._prev_block_end_idx)
+            self.feature_map, new_worker_rows = await self.distributor.distribute_conv(
+                self.feature_map, layer, quant_params, self.current_layer_idx, halo_state
             )
 
         # Apply residual connection
         if layer.residual_connect_from:
             self._apply_residual(layer.residual_connect_from)
+            # invalidate the halo reuse state after residual connection
+            self._prev_worker_rows = None
+            self._prev_block_end_idx = None
+        elif new_worker_rows is None:
+            self._prev_worker_rows = None
+            self._prev_block_end_idx = None
+        else:
+            self._prev_worker_rows = new_worker_rows
+            self._prev_block_end_idx = self.current_layer_idx
+
 
     async def _run_block(self, block: BlockConfig) -> None:
         """Execute a multi-layer block in one round-trip.
@@ -192,16 +215,29 @@ class InferenceEngine:
                 f"[Engine]: Stored residual buffer '{block.residual_cache_name}' "
                 f"with shape {self.feature_map.shape}"
             )
-
+        
+        # halo state
+        halo_state = None
+        if self.use_halo and self._prev_block_end_idx is not None:
+            halo_state  = (self._prev_worker_rows, self._prev_block_end_idx)
         # Distribute block across workers
-        self.feature_map = await self.distributor.distribute_block(
-            self.feature_map, block, self.current_layer_idx
+        self.feature_map, new_worker_rows = await self.distributor.distribute_block(
+            self.feature_map, block, self.current_layer_idx, halo_state
         )
 
         # Apply residual (add cached input to block output)
         if block.residual_connect_name:
             self.current_layer_idx = block.end_idx
             self._apply_residual(block.residual_connect_name)
+            # invalidate the halo reuse state after residual connection
+            self._prev_worker_rows = None
+            self._prev_block_end_idx = None
+        elif new_worker_rows is None:
+            self._prev_worker_rows = None
+            self._prev_block_end_idx = None
+        else:
+            self._prev_worker_rows = new_worker_rows
+            self._prev_block_end_idx = block.end_idx
 
     # ------------------------------------------------------------------
     # Residual connection

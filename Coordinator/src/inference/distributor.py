@@ -45,8 +45,14 @@ class TaskDistributor:
     # ------------------------------------------------------------------
 
     async def distribute_conv(self, feature_map: np.ndarray, 
-                              layer: LayerConfig, quant_params: QuantParams, current_layer_idx: int) -> np.ndarray:
-        """Split ``feature_map`` by rows and return assembled output."""
+                              layer: LayerConfig, quant_params: QuantParams, current_layer_idx: int,
+                              halo_state: tuple | None = None) -> tuple[np.ndarray, list[tuple[int, int] | None] | None]:
+        """Split ``feature_map`` by rows and return assembled output.
+
+        When ``halo_state`` is provided, workers may reuse their previously
+        cached output rows instead of re-receiving them, mirroring the halo
+        reuse path in ``distribute_block``.
+        """
         C, H, W = feature_map.shape
         H_out = (H + 2 * layer.padding - layer.kernel_size) // layer.stride + 1
         W_out = (W + 2 * layer.padding - layer.kernel_size) // layer.stride + 1
@@ -55,11 +61,14 @@ class TaskDistributor:
         num_workers = len(available_workers)
         rows_per_worker = int(np.ceil(H_out / num_workers))
         tasks: list[tuple[WorkerInfo, int, int, asyncio.Task]] = []
+        new_worker_rows: list[tuple[int, int] | None] = [None] * num_workers
+        any_skipped = False
 
         for i, worker in enumerate(available_workers):
             start_row = i * rows_per_worker
             end_row = min(start_row + rows_per_worker, H_out)
             if start_row >= H_out:
+                any_skipped = True
                 continue
 
             in_start_y_raw = start_row * layer.stride - layer.padding
@@ -71,38 +80,91 @@ class TaskDistributor:
             pad_top = in_start_y - in_start_y_raw
             pad_bottom = in_end_y_raw - in_end_y
 
-            input_patch = feature_map[:, in_start_y:in_end_y, :]
-
-            task_msg = TaskMessage(
-                layer_type=layer.type,
-                layer_idx=current_layer_idx,
-                end_layer_idx=current_layer_idx,
-                in_channels=layer.in_channels,
-                in_h=input_patch.shape[1],
-                in_w=input_patch.shape[2],
-                out_channels=layer.out_channels,
-                out_h=end_row - start_row,
-                out_w=W_out,
-                kernel_size=layer.kernel_size,
-                stride=layer.stride,
-                padding=layer.padding,
-                groups=layer.groups,
-                in_features=0,
-                out_features=0,
-                input_size=input_patch.size,
-                block_pad_top=pad_top,
-                block_pad_bottom=pad_bottom,
+            halo_usable = (
+                halo_state is not None
+                and i < len(halo_state[0])
+                and halo_state[0][i] is not None
             )
+            if halo_usable:
+                prev_start, prev_end = halo_state[0][i]
+                ov_start = max(in_start_y, prev_start)
+                ov_end = min(in_end_y, prev_end)
+                if ov_end <= ov_start:
+                    halo_usable = False
+            if halo_usable:
+                logger.debug(
+                    f"[Distributor]: Reusing halo cache for worker {worker.worker_id} on layer {current_layer_idx} ({layer.name}), "
+                    f"halo rows {ov_start}-{ov_end} (pad_top={pad_top}, pad_bottom={pad_bottom})"
+                )
+                cache_use_start = ov_start - prev_start
+                cache_use_end = ov_end - prev_start
+                halo_top = feature_map[:, in_start_y:ov_start, :]
+                halo_bottom = feature_map[:, ov_end:in_end_y, :]
+                payload = np.concatenate([halo_top, halo_bottom], axis=1)
+                task_msg = TaskMessage(
+                    layer_type=layer.type,
+                    layer_idx=current_layer_idx,
+                    end_layer_idx=current_layer_idx,
+                    in_channels=layer.in_channels,
+                    in_h=in_end_y - in_start_y,
+                    in_w=W,
+                    out_channels=layer.out_channels,
+                    out_h=end_row - start_row,
+                    out_w=W_out,
+                    kernel_size=layer.kernel_size,
+                    stride=layer.stride,
+                    padding=layer.padding,
+                    groups=layer.groups,
+                    in_features=0,
+                    out_features=0,
+                    input_size=payload.size,
+                    block_pad_top=pad_top,
+                    block_pad_bottom=pad_bottom,
+                    use_halo_cache=1,
+                    halo_top_rows=halo_top.shape[1],
+                    halo_bottom_rows=halo_bottom.shape[1],
+                    cache_use_start=cache_use_start,
+                    cache_use_end=cache_use_end,
+                    prev_block_end_idx=halo_state[1],
+                )
+            else:
+                input_patch = feature_map[:, in_start_y:in_end_y, :]
+                payload = input_patch
+                task_msg = TaskMessage(
+                    layer_type=layer.type,
+                    layer_idx=current_layer_idx,
+                    end_layer_idx=current_layer_idx,
+                    in_channels=layer.in_channels,
+                    in_h=input_patch.shape[1],
+                    in_w=input_patch.shape[2],
+                    out_channels=layer.out_channels,
+                    out_h=end_row - start_row,
+                    out_w=W_out,
+                    kernel_size=layer.kernel_size,
+                    stride=layer.stride,
+                    padding=layer.padding,
+                    groups=layer.groups,
+                    in_features=0,
+                    out_features=0,
+                    input_size=input_patch.size,
+                    block_pad_top=pad_top,
+                    block_pad_bottom=pad_bottom,
+                )
 
-            task = asyncio.create_task(self._send_task_to_worker(worker, task_msg, input_patch, current_layer_idx))
+            task = asyncio.create_task(self._send_task_to_worker(worker, task_msg, payload, current_layer_idx))
             tasks.append((worker, start_row, end_row, task))
+            new_worker_rows[i] = (start_row, end_row)
             logger.debug(
                 f"[Distributor]: Assigned output rows {start_row}-{end_row} to worker {worker.worker_id} for layer {layer.name}"
             )
 
         await asyncio.gather(*[t[3] for t in tasks])
         output_shape = (layer.out_channels, H_out, W_out)
-        return await self._collect_results(tasks, output_shape, current_layer_idx)
+        output = await self._collect_results(tasks, output_shape, current_layer_idx)
+        if any_skipped:
+            return output, None
+        return output, new_worker_rows
+
 
     async def distribute_fc(self, feature_map: np.ndarray, 
                             layer: LayerConfig, quant_params: QuantParams, current_layer_idx: int) -> np.ndarray:
@@ -153,7 +215,8 @@ class TaskDistributor:
         output_shape = (total_classes,)
         return await self._collect_results(tasks, output_shape, current_layer_idx)
 
-    async def distribute_block(self, feature_map: np.ndarray, block: BlockConfig, current_layer_idx: int) -> np.ndarray:
+    async def distribute_block(self, feature_map: np.ndarray, block: BlockConfig, current_layer_idx: int, 
+                               halo_state: tuple | None = None) -> tuple[np.ndarray, list[tuple[int, int]] | None]:
         """Distribute a multi-layer block by row-splitting the block input.
 
         DW padding is applied on the worker side *after* the expand layer.
@@ -178,8 +241,8 @@ class TaskDistributor:
                 if layer.type == LayerType.FC:
                     result = await self.distribute_fc(result, layer, qp, layer.layer_idx)
                 else:
-                    result = await self.distribute_conv(result, layer, qp, layer.layer_idx)
-            return result
+                    result, _ = await self.distribute_conv(result, layer, qp, layer.layer_idx)
+            return result, None
 
         dw_padding = dw_layer.padding
         dw_kernel = dw_layer.kernel_size
@@ -194,10 +257,13 @@ class TaskDistributor:
         rows_per_worker = int(np.ceil(H_out / num_workers))
 
         tasks: list[tuple[WorkerInfo, int, int, asyncio.Task]] = []
+        new_worker_rows: list[tuple[int, int] | None] = [None] * num_workers
+        any_skipped = False
         for i, worker in enumerate(available_workers):
             out_start = i * rows_per_worker
             out_end = min(out_start + rows_per_worker, H_out)
             if out_start >= H_out:
+                any_skipped = True
                 continue
 
             in_start_y_raw = out_start * dw_stride - dw_padding
@@ -209,41 +275,95 @@ class TaskDistributor:
             pad_top = in_start_y - in_start_y_raw
             pad_bottom = in_end_y_raw - in_end_y
 
-            input_patch = feature_map[:, in_start_y:in_end_y, :]
-
-            task_msg = TaskMessage(
-                layer_type=block.layers[0].type,
-                layer_idx=block.start_idx,
-                end_layer_idx=block.end_idx,
-                in_channels=block.layers[0].in_channels,
-                in_h=input_patch.shape[1],
-                in_w=input_patch.shape[2],
-                out_channels=out_channels,
-                out_h=out_end - out_start,
-                out_w=W_out,
-                kernel_size=block.layers[0].kernel_size,
-                stride=block.layers[0].stride,
-                padding=0,
-                groups=block.layers[0].groups,
-                in_features=0,
-                out_features=0,
-                input_size=input_patch.size,
-                block_pad_top=pad_top,
-                block_pad_bottom=pad_bottom,
+            halo_usable = (
+                halo_state is not None
+                and i < len(halo_state[0])
+                and halo_state[0][i] is not None
             )
+            if halo_usable:
+                prev_start, prev_end = halo_state[0][i]
+                ov_start = max(in_start_y, prev_start)
+                ov_end = min(in_end_y, prev_end)
+                if ov_end <= ov_start:
+                    halo_usable = False
+            if halo_usable:
+                logger.debug(
+                    f"[Distributor]: Reusing halo cache for worker {worker.worker_id} on block [{block.start_idx}-{block.end_idx}], "
+                    f"halo rows {ov_start}-{ov_end} (pad_top={pad_top}, pad_bottom={pad_bottom})"
+                )
+                cache_use_start = ov_start - prev_start
+                cache_use_end = ov_end - prev_start
+                halo_top = feature_map[:, in_start_y:ov_start, :]
+                halo_bottom = feature_map[:, ov_end:in_end_y, :]
+                payload = np.concatenate([halo_top, halo_bottom], axis=1)
+                task_msg = TaskMessage(
+                    layer_type=block.layers[0].type,
+                    layer_idx=block.start_idx,
+                    end_layer_idx=block.end_idx,
+                    in_channels=block.layers[0].in_channels,
+                    in_h=in_end_y - in_start_y,
+                    in_w=feature_map.shape[2],
+                    out_channels=out_channels,
+                    out_h=out_end - out_start,
+                    out_w=W_out,
+                    kernel_size=block.layers[0].kernel_size,
+                    stride=block.layers[0].stride,
+                    padding=0,
+                    groups=block.layers[0].groups,
+                    in_features=0,
+                    out_features=0,
+                    input_size=payload.size,
+                    block_pad_top=pad_top,
+                    block_pad_bottom=pad_bottom,
+                    use_halo_cache=1,
+                    halo_top_rows=halo_top.shape[1],
+                    halo_bottom_rows=halo_bottom.shape[1],
+                    cache_use_start=cache_use_start,
+                    cache_use_end=cache_use_end,
+                    prev_block_end_idx=halo_state[1],
+                )
+            else:
 
-            task = asyncio.create_task(self._send_task_to_worker(worker, task_msg, input_patch, current_layer_idx))
+                input_patch = feature_map[:, in_start_y:in_end_y, :]
+                payload = input_patch
+                task_msg = TaskMessage(
+                    layer_type=block.layers[0].type,
+                    layer_idx=block.start_idx,
+                    end_layer_idx=block.end_idx,
+                    in_channels=block.layers[0].in_channels,
+                    in_h=input_patch.shape[1],
+                    in_w=input_patch.shape[2],
+                    out_channels=out_channels,
+                    out_h=out_end - out_start,
+                    out_w=W_out,
+                    kernel_size=block.layers[0].kernel_size,
+                    stride=block.layers[0].stride,
+                    padding=0,
+                    groups=block.layers[0].groups,
+                    in_features=0,
+                    out_features=0,
+                    input_size=input_patch.size,
+                    block_pad_top=pad_top,
+                    block_pad_bottom=pad_bottom,
+                )
+
+            task = asyncio.create_task(self._send_task_to_worker(worker, task_msg, payload, current_layer_idx))
             tasks.append((worker, out_start, out_end, task))
+            new_worker_rows[i] = (out_start, out_end)
             logger.debug(
                 f"[Distributor]: Block [{block.start_idx}-{block.end_idx}] "
                 f"assigned output rows {out_start}-{out_end} to worker {worker.worker_id}, "
-                f"input patch shape {input_patch.shape}, "
+                f"input patch shape {payload.shape}, "
                 f"pad_top={pad_top}, pad_bottom={pad_bottom}"
             )
 
         await asyncio.gather(*[t[3] for t in tasks])
         output_shape = (out_channels, H_out, W_out)
-        return await self._collect_results(tasks, output_shape, current_layer_idx)
+        output = await self._collect_results(tasks, output_shape, current_layer_idx)
+        if any_skipped:
+            return output, None
+        return output, new_worker_rows
+        # return await self._collect_results(tasks, output_shape, current_layer_idx)
 
     # ------------------------------------------------------------------
     # Shutdown helper (delegates to worker_manager)
