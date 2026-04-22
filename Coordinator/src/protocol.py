@@ -78,7 +78,7 @@ class RegisterAckMessage:
 # TODO optimize the payload structure, e.g. conv params and linear params don't need to be transmitted in the task message
 @dataclass
 class TaskMessage:
-    FORMAT = '<BIIIIIIIIBBBHIIIBB'
+    FORMAT = '<BIIIIIIIIBBBHIIIBBBHHHHI'
     SIZE = struct.calcsize(FORMAT)
     
     layer_type: LayerType
@@ -110,12 +110,22 @@ class TaskMessage:
     block_pad_top: int = 0
     block_pad_bottom: int = 0
 
+    # halo reuse
+    use_halo_cache: int = 0 # 0: full patch, 1: halo + worker cache
+    halo_top_rows: int = 0 # rows of halo_top in payload
+    halo_bottom_rows: int = 0 # rows of halo_bottom in payload
+    cache_use_start: int = 0 # start row index of worker cache to use (inclusive)
+    cache_use_end: int = 0 # end row index of worker cache to use (exclusive)
+    prev_block_end_idx: int = 0
+    
+
     def pack(self) -> bytes:
         data = struct.pack('<BII', self.layer_type, self.layer_idx, self.end_layer_idx)
         data += struct.pack('<IIIIII', self.in_channels, self.in_h, self.in_w, self.out_channels, self.out_h, self.out_w)
         data += struct.pack('<BBBH', self.kernel_size, self.stride, self.padding, self.groups)
         data += struct.pack('<III', self.in_features, self.out_features, self.input_size)
         data += struct.pack('<BB', self.block_pad_top, self.block_pad_bottom)
+        data += struct.pack('<BHHHHI', self.use_halo_cache, self.halo_top_rows, self.halo_bottom_rows, self.cache_use_start, self.cache_use_end, self.prev_block_end_idx)
         return data
 
 

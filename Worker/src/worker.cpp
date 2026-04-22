@@ -168,36 +168,89 @@ void Worker::HandleReceivingTask() {
 #ifdef DEBUG
     Serial.printf("Worker %d receiving task...\n", worker_id_);
 #endif
-    Read((uint8_t *)&current_task_, sizeof(current_task_)); // TODO error handling
-    uint32_t total_data_size = current_task_.input_size;
-    if (total_data_size > sizeof(input_buffer_)) {
-        Serial.println("Input data size exceeds buffer size");
-        SendError(ErrorCode::ERR_OUT_OF_MEMORY, "Input data size exceeds buffer size");
-        state_ = WorkerState::IDLE;
-        return;
-    }
-    Read(input_buffer_, total_data_size);
+    Read((uint8_t *)&current_task_, sizeof(current_task_)); // TODO error 
+    
+    // add the halo reuse logic
+    if (current_task_.use_halo_cache) {
+        // halo reuse
+        if (!cache_valid_ || cache_block_end_idx_ != current_task_.prev_block_end_idx) {
+            SendError(ErrorCode::ERR_INVALID_TASK, "Invalid halo cache state for reuse");
+            state_ = WorkerState::IDLE;
+            return;
+        }
+        
+        uint16_t top_rows = current_task_.halo_top_rows;
+        uint16_t bottom_rows = current_task_.halo_bottom_rows;
+        uint16_t cache_use_start = current_task_.cache_use_start;
+        uint16_t cache_use_end = current_task_.cache_use_end;
+        uint16_t cache_use_rows = cache_use_end - cache_use_start;
+        
+        uint16_t C = cache_channels_;
+        uint16_t W = cache_width_;
+        uint16_t H_total = top_rows + cache_use_rows + bottom_rows;
 
-    // Auto-detect rANS compressed input and decompress
-    if (total_data_size >= sizeof(rans::Header)) {
-        const rans::Header *hdr = reinterpret_cast<const rans::Header *>(input_buffer_);
-        if (hdr->magic == rans::MAGIC) {
-            // Decompress: input_buffer_ → output_buffer_ → input_buffer_
-            size_t decompressed = rans::decompress(input_buffer_, total_data_size,
-                                                   output_buffer_, sizeof(output_buffer_));
-            if (decompressed == 0) {
-                SendError(ErrorCode::ERR_OUT_OF_MEMORY, "Input decompression failed");
-                state_ = WorkerState::IDLE;
-                return;
-            }
-            memcpy(input_buffer_, output_buffer_, decompressed);
+        // layout: [C, (halo_top, cache_use, halo_bottom), W]
+        size_t top_bytes = (size_t)C * top_rows * W;
+        size_t cache_bytes = (size_t)C * cache_use_rows * W;
+        size_t bottom_bytes = (size_t)C * bottom_rows * W;
+
+        // halo_top and halo_bottom will be placed at the end of buffer first
+        size_t tmp_top_off = sizeof(input_buffer_) - top_bytes - bottom_bytes;
+        size_t tmp_bottom_off = sizeof(input_buffer_) - bottom_bytes;
+        if (top_bytes) Read(input_buffer_ + tmp_top_off, top_bytes);
+        if (bottom_bytes) Read(input_buffer_ + tmp_bottom_off, bottom_bytes);
 #ifdef DEBUG
-            Serial.printf("Worker %d decompressed input: %u -> %u bytes\n",
-                          worker_id_, total_data_size, (uint32_t)decompressed);
+        Serial.printf("Worker %d received task with halo reuse, top_rows: %d, bottom_rows: %d, cache_use_rows: %d\n", 
+            worker_id_, top_rows, bottom_rows, cache_use_rows);
 #endif
+        // copy by channels
+        for (uint16_t c = 0; c < C; ++c) {
+            uint8_t *dst = input_buffer_ + (size_t)c * H_total * W;
+            const uint8_t *cache_row = output_buffer_ + ((size_t)c * cache_rows_ + cache_use_start) * W;
+
+            if (top_rows) {
+                memcpy(dst, input_buffer_ + tmp_top_off + (size_t)c * top_rows * W, (size_t)top_rows * W);
+            }
+            memcpy(dst + (size_t)top_rows * W, cache_row, (size_t)cache_use_rows * W);
+            if (bottom_rows) {
+                memcpy(dst + (size_t)(top_rows + cache_use_rows) * W, 
+                        input_buffer_ + tmp_bottom_off + (size_t)c * bottom_rows * W, 
+                        (size_t)bottom_rows * W);
+            }
+        }
+            
+
+    } else {
+        // normal path
+        uint32_t total_data_size = current_task_.input_size;
+        if (total_data_size > sizeof(input_buffer_)) {
+            Serial.println("Input data size exceeds buffer size");
+            SendError(ErrorCode::ERR_OUT_OF_MEMORY, "Input data size exceeds buffer size");
+            state_ = WorkerState::IDLE;
+            return;
+        }
+        Read(input_buffer_, total_data_size);
+
+        // Auto-detect rANS compressed input and decompress
+        if (total_data_size >= sizeof(rans::Header)) {
+            const rans::Header *hdr = reinterpret_cast<const rans::Header *>(input_buffer_);
+            if (hdr->magic == rans::MAGIC) {
+                // Decompress: input_buffer_ → output_buffer_ → input_buffer_
+                size_t decompressed = rans::decompress(input_buffer_, total_data_size,
+                                                    output_buffer_, sizeof(output_buffer_));
+                if (decompressed == 0) {
+                    SendError(ErrorCode::ERR_OUT_OF_MEMORY, "Input decompression failed");
+                    state_ = WorkerState::IDLE;
+                    return;
+                }
+                memcpy(input_buffer_, output_buffer_, decompressed);
+#ifdef DEBUG
+                Serial.printf("Worker %d decompressed input: %u -> %u bytes\n",
+                            worker_id_, total_data_size, (uint32_t)decompressed);
+#endif
+            }
         }
     }
-
     state_ = WorkerState::COMPUTING;
 }
 
@@ -388,7 +441,6 @@ void Worker::HandleBlockComputing() {
                                         cfg, &model_quant_params[idx], cur_h, cur_w,
                                         workspace, workspace_size);                
             }
-
             // conv2d::pointwise_conv2d(src, weights, bias, dst,
             //                         cfg, &model_quant_params[idx], cur_h, cur_w,
             //                         workspace, workspace_size);
@@ -432,6 +484,13 @@ void Worker::HandleBlockComputing() {
         // Final output is in input_buffer_, copy to output_buffer_
         memcpy(output_buffer_, input_buffer_, output_size);
     }
+
+    // halo reuse flag
+    cache_valid_ = true;
+    cache_block_end_idx_ = end_idx;
+    cache_channels_ = current_task_.out_channels;
+    cache_rows_ = current_task_.out_h;
+    cache_width_ = current_task_.out_w;
 
 #ifdef DEBUG
     // Serial.printf("Worker %d block done: %u layers, output %u bytes, compute %u us\n",

@@ -59,6 +59,13 @@ private:
 
     // for memory tracking
     mem::MemoryTracker mem_tracker_;
+
+    // for halo reuse
+    bool cache_valid_ = false;
+    uint32_t cache_block_end_idx_ = 0;
+    uint16_t cache_channels_ = 0;
+    uint16_t cache_rows_ = 0;
+    uint16_t cache_width_ = 0;
 };
 
 #endif // WORKER_H
