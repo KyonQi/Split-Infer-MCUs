@@ -18,6 +18,7 @@ from ..model.types import BlockConfig, LayerConfig, QuantParams
 from ..protocol import (
     ErrorMessage,
     LayerType,
+    MessageHeader,
     MessageType,
     ResultMessage,
     TaskMessage,
@@ -46,7 +47,8 @@ class TaskDistributor:
 
     async def distribute_conv(self, feature_map: np.ndarray, 
                               layer: LayerConfig, quant_params: QuantParams, current_layer_idx: int,
-                              halo_state: tuple | None = None) -> tuple[np.ndarray, list[tuple[int, int] | None] | None]:
+                              halo_state: tuple | None = None, 
+                              return_halo_plan: tuple[list[int], list[int]] | None = None) -> tuple[np.ndarray, list[tuple[int, int] | None] | None]:
         """Split ``feature_map`` by rows and return assembled output.
 
         When ``halo_state`` is provided, workers may reuse their previously
@@ -80,6 +82,8 @@ class TaskDistributor:
             pad_top = in_start_y - in_start_y_raw
             pad_bottom = in_end_y_raw - in_end_y
 
+            k_top, k_bottom = self._resolve_return_halo(return_halo_plan, i, end_row - start_row)
+
             halo_usable = (
                 halo_state is not None
                 and i < len(halo_state[0])
@@ -100,7 +104,9 @@ class TaskDistributor:
                 cache_use_end = ov_end - prev_start
                 halo_top = feature_map[:, in_start_y:ov_start, :]
                 halo_bottom = feature_map[:, ov_end:in_end_y, :]
-                payload = np.concatenate([halo_top, halo_bottom], axis=1)
+                # payload = np.concatenate([halo_top, halo_bottom], axis=1)
+                payload_bytes = (np.ascontiguousarray(halo_top).tobytes() + np.ascontiguousarray(halo_bottom).tobytes())
+                payload = np.frombuffer(payload_bytes, dtype=np.uint8)
                 task_msg = TaskMessage(
                     layer_type=layer.type,
                     layer_idx=current_layer_idx,
@@ -126,7 +132,12 @@ class TaskDistributor:
                     cache_use_start=cache_use_start,
                     cache_use_end=cache_use_end,
                     prev_block_end_idx=halo_state[1],
+                    return_halo=1 if (k_top or k_bottom) else 0,
+                    return_halo_top_rows=k_top,
+                    return_halo_bottom_rows=k_bottom,
                 )
+                full_input_bytes = layer.in_channels * (in_end_y - in_start_y) * W
+                send_full = full_input_bytes
             else:
                 input_patch = feature_map[:, in_start_y:in_end_y, :]
                 payload = input_patch
@@ -149,13 +160,18 @@ class TaskDistributor:
                     input_size=input_patch.size,
                     block_pad_top=pad_top,
                     block_pad_bottom=pad_bottom,
+                    return_halo=1 if (k_top or k_bottom) else 0,
+                    return_halo_top_rows=k_top,
+                    return_halo_bottom_rows=k_bottom,
                 )
+                send_full = None
 
-            task = asyncio.create_task(self._send_task_to_worker(worker, task_msg, payload, current_layer_idx))
-            tasks.append((worker, start_row, end_row, task))
+            task = asyncio.create_task(self._send_task_to_worker(worker, task_msg, payload, current_layer_idx, send_full))
+            tasks.append((worker, start_row, end_row, task, k_top, k_bottom))
             new_worker_rows[i] = (start_row, end_row)
             logger.debug(
                 f"[Distributor]: Assigned output rows {start_row}-{end_row} to worker {worker.worker_id} for layer {layer.name}"
+                f"{f', return halo rows top:{k_top} bottom:{k_bottom}' if (k_top or k_bottom) else ''}"
             )
 
         await asyncio.gather(*[t[3] for t in tasks])
@@ -206,7 +222,8 @@ class TaskDistributor:
                 input_size=input_vec.size,
             )
             task = asyncio.create_task(self._send_task_to_worker(worker, task_msg, input_vec, current_layer_idx))
-            tasks.append((worker, start_cls, end_cls, task))
+            # tasks.append((worker, start_cls, end_cls, task))
+            tasks.append((worker, start_cls, end_cls, task, 0, 0)) # no return halo
             logger.debug(
                 f"[Distributor]: Assigned classes {start_cls}-{end_cls} to worker {worker.worker_id} for FC layer {layer.name}"
             )
@@ -216,7 +233,8 @@ class TaskDistributor:
         return await self._collect_results(tasks, output_shape, current_layer_idx)
 
     async def distribute_block(self, feature_map: np.ndarray, block: BlockConfig, current_layer_idx: int, 
-                               halo_state: tuple | None = None) -> tuple[np.ndarray, list[tuple[int, int]] | None]:
+                               halo_state: tuple | None = None,
+                               return_halo_plan: tuple[list[int], list[int]] | None = None) -> tuple[np.ndarray, list[tuple[int, int]] | None]:
         """Distribute a multi-layer block by row-splitting the block input.
 
         DW padding is applied on the worker side *after* the expand layer.
@@ -275,6 +293,8 @@ class TaskDistributor:
             pad_top = in_start_y - in_start_y_raw
             pad_bottom = in_end_y_raw - in_end_y
 
+            k_top, k_bottom = self._resolve_return_halo(return_halo_plan, i, out_end - out_start)
+
             halo_usable = (
                 halo_state is not None
                 and i < len(halo_state[0])
@@ -295,7 +315,9 @@ class TaskDistributor:
                 cache_use_end = ov_end - prev_start
                 halo_top = feature_map[:, in_start_y:ov_start, :]
                 halo_bottom = feature_map[:, ov_end:in_end_y, :]
-                payload = np.concatenate([halo_top, halo_bottom], axis=1)
+                # payload = np.concatenate([halo_top, halo_bottom], axis=1)
+                payload_bytes = (np.ascontiguousarray(halo_top).tobytes() + np.ascontiguousarray(halo_bottom).tobytes())
+                payload = np.frombuffer(payload_bytes, dtype=np.uint8)
                 task_msg = TaskMessage(
                     layer_type=block.layers[0].type,
                     layer_idx=block.start_idx,
@@ -321,9 +343,12 @@ class TaskDistributor:
                     cache_use_start=cache_use_start,
                     cache_use_end=cache_use_end,
                     prev_block_end_idx=halo_state[1],
+                    return_halo=1 if (k_top or k_bottom) else 0,
+                    return_halo_top_rows=k_top,
+                    return_halo_bottom_rows=k_bottom,
                 )
+                send_full = block.layers[0].in_channels * (in_end_y - in_start_y) * feature_map.shape[2]
             else:
-
                 input_patch = feature_map[:, in_start_y:in_end_y, :]
                 payload = input_patch
                 task_msg = TaskMessage(
@@ -345,16 +370,21 @@ class TaskDistributor:
                     input_size=input_patch.size,
                     block_pad_top=pad_top,
                     block_pad_bottom=pad_bottom,
+                    return_halo=1 if (k_top or k_bottom) else 0,
+                    return_halo_top_rows=k_top,
+                    return_halo_bottom_rows=k_bottom,
                 )
+                send_full = None
 
-            task = asyncio.create_task(self._send_task_to_worker(worker, task_msg, payload, current_layer_idx))
-            tasks.append((worker, out_start, out_end, task))
+            task = asyncio.create_task(self._send_task_to_worker(worker, task_msg, payload, current_layer_idx, send_full))
+            tasks.append((worker, out_start, out_end, task, k_top, k_bottom))
             new_worker_rows[i] = (out_start, out_end)
             logger.debug(
                 f"[Distributor]: Block [{block.start_idx}-{block.end_idx}] "
                 f"assigned output rows {out_start}-{out_end} to worker {worker.worker_id}, "
                 f"input patch shape {payload.shape}, "
-                f"pad_top={pad_top}, pad_bottom={pad_bottom}"
+                f"pad_top={pad_top}, pad_bottom={pad_bottom}, "
+                f"{f', return halo rows top:{k_top} bottom:{k_bottom}' if (k_top or k_bottom) else ''}"
             )
 
         await asyncio.gather(*[t[3] for t in tasks])
@@ -382,7 +412,8 @@ class TaskDistributor:
 
     async def _send_task_to_worker(self, worker: WorkerInfo, 
                                    task_msg: TaskMessage, input_patch: np.ndarray, 
-                                   current_layer_idx: int) -> None:
+                                   current_layer_idx: int,
+                                   send_bytes_full: int | None = None) -> None:
         worker.state = WorkerState.BUSY
         input_bytes = np.ascontiguousarray(input_patch).tobytes()
 
@@ -390,10 +421,14 @@ class TaskDistributor:
         await self.worker_manager.send_message(worker, MessageType.TASK, task_msg.pack() + input_bytes)
         send_time = time.perf_counter() - send_start
 
-        self.stats.record_worker_send(worker.worker_id, send_time * 1000)
+        send_bytes_actual = len(input_bytes)
+        if send_bytes_full is None:
+            send_bytes_full = send_bytes_actual # no halo savings
+        self.stats.record_worker_send(worker.worker_id, send_time * 1000, send_bytes_actual, send_bytes_full)
 
         logger.debug(
             f"[Distributor]: Sent task for layer {current_layer_idx} to worker {worker.worker_id}, waiting for result..."
+            f"actual={send_bytes_actual}B, full={send_bytes_full}B"
         )
 
     async def _collect_results(self, tasks: list[tuple[WorkerInfo, int, int, asyncio.Task]], 
@@ -404,9 +439,9 @@ class TaskDistributor:
         )
 
         receive_tasks = []
-        for worker, start_idx, end_idx, _ in tasks:
+        for worker, start_idx, end_idx, _, k_top, k_bottom in tasks:
             t = asyncio.create_task(
-                self._receive_worker_result(worker, start_idx, end_idx, output, current_layer_idx)
+                self._receive_worker_result(worker, start_idx, end_idx, k_top, k_bottom, output, current_layer_idx)
             )
             receive_tasks.append(t)
         await asyncio.gather(*receive_tasks)
@@ -415,6 +450,7 @@ class TaskDistributor:
 
     async def _receive_worker_result(self, worker: WorkerInfo, 
                                      start_idx: int, end_idx: int, 
+                                     k_top: int, k_bottom: int,
                                      output: np.ndarray, current_layer_idx: int) -> None:
         try:
             header, payload = await self.worker_manager.receive_message(worker, timeout=60)
@@ -450,23 +486,50 @@ class TaskDistributor:
             # Parse output data and write to correct position
             if output.ndim == 3:
                 C, _, W = output.shape
-                H_slice = end_idx - start_idx
-                output_patch = np.frombuffer(output_data, dtype=np.uint8).reshape((C, H_slice, W))
-                logger.debug(
-                    f"[Distributor]: worker:{worker.worker_id}, output_data size: {len(output_data)} bytes, "
-                    f"reshaped to {output_patch.shape}"
-                )
-                output[:, start_idx:end_idx, :] = output_patch
+                full_slice_bytes = (end_idx - start_idx) * C * W
+
+                if k_top or k_bottom:
+                    # halo return
+                    expected =  C * (k_top + k_bottom) * W
+                    if result_msg.output_size != expected:
+                        raise RuntimeError(
+                            f"Worker {worker.worker_id} return-halo size mismatched: "
+                            f"got {result_msg.output_size} bytes, expected {expected} bytes "
+                        )
+                    top_bytes = C * k_top * W
+                    if k_top:
+                        top_patch = np.frombuffer(output_data[:top_bytes], dtype=np.uint8).reshape((C, k_top, W))
+                        output[:, start_idx:start_idx+k_top, :] = top_patch
+                    if k_bottom:
+                        bottom_patch = np.frombuffer(output_data[top_bytes:], dtype=np.uint8).reshape((C, k_bottom, W))
+                        output[:, end_idx-k_bottom:end_idx, :] = bottom_patch
+                    logger.debug(
+                        f"[Distributor]: Worker {worker.worker_id} returned halo rows top:{k_top} bottom:{k_bottom}, "
+                        f"written to output rows [{start_idx}:{start_idx+k_top}, {end_idx-k_bottom}:{end_idx}] "
+                    )
+                else:
+                    H_slice = end_idx - start_idx
+                    output_patch = np.frombuffer(output_data, dtype=np.uint8).reshape((C, H_slice, W))
+                    logger.debug(
+                        f"[Distributor]: worker:{worker.worker_id}, output_data size: {len(output_data)} bytes, "
+                        f"reshaped to {output_patch.shape}"
+                    )
+                    output[:, start_idx:end_idx, :] = output_patch
             else:
+                full_slice_bytes = end_idx - start_idx
                 output_patch = np.frombuffer(output_data, dtype=np.uint8)
                 output[start_idx:end_idx] = output_patch
 
             # Update stats
+            recv_bytes_actual = result_msg.output_size
+            
             self.stats.record_worker_result(
                 worker.worker_id,
                 compute_ms=result_msg.compute_time_us / 1000,
                 compress_ms=result_msg.compress_time_us / 1000,
                 recv_time_ms=recv_time * 1000,
+                recv_bytes_actual=recv_bytes_actual,
+                recv_bytes_full=full_slice_bytes,
             )
 
             self.worker_manager.mark_worker_idle(worker)
@@ -483,3 +546,14 @@ class TaskDistributor:
             await self.shutdown_workers()
             worker.state = WorkerState.DISCONNECTED
             raise
+    
+    def _resolve_return_halo(self, return_halo_plan: tuple[list[int], list[int]] | None, worker_idx: int, slice_rows: int) -> tuple[int, int]:
+        """ Resolve per-worker return halo rows """
+        if return_halo_plan is None:
+            return 0, 0
+        k_top = return_halo_plan[0][worker_idx] if worker_idx < len(return_halo_plan[0]) else 0
+        k_bottom = return_halo_plan[1][worker_idx] if worker_idx < len(return_halo_plan[1]) else 0
+        # Ensure we don't request more halo rows than the slice size
+        if k_top + k_bottom <= 0 or k_top + k_bottom >= slice_rows:
+            return 0, 0
+        return k_top, k_bottom

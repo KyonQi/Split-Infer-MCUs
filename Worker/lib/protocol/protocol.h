@@ -72,13 +72,17 @@ struct TaskMessage {
     uint8_t block_pad_top;    // rows of DW zero-padding at top    (0 or dw_padding)
     uint8_t block_pad_bottom; // rows of DW zero-padding at bottom (0 or dw_padding)
 
-    // halo resue
+    // halo resue (forwarding coord -> worker)
     uint8_t use_halo_cache; // 0: full patch, 1: halo + worker cache
     uint16_t halo_top_rows; // rows of halo_top in payload
     uint16_t halo_bottom_rows; // rows of halo_bottom in payload
     uint16_t cache_use_start; // start row index of worker cache to use (inclusive)
     uint16_t cache_use_end; // end row index of worker cache to use (exclusive)
     uint32_t prev_block_end_idx; // the end layer index of the previous block
+    // halo reuse (backwarding worker -> coord)
+    uint8_t return_halo; // 0: full patch, 1: top + bottom rows only
+    uint16_t return_halo_top_rows; // rows of halo_top in returned result
+    uint16_t return_halo_bottom_rows; // rows of halo_bottom in returned result
 } __attribute__((packed));
 
 struct ResultMessage {

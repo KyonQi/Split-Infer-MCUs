@@ -86,13 +86,14 @@ class InferenceEngine:
 
         start_time = time.time()
 
-        for block in blocks:
+        for i, block in enumerate(blocks):
+            next_block = blocks[i + 1] if i + 1 < len(blocks) else None
             is_single = block.start_idx == block.end_idx
 
             if is_single:
-                await self._execute_single_layer_block(block)
+                await self._execute_single_layer_block(block, next_block)
             else:
-                await self._execute_multi_layer_block(block)
+                await self._execute_multi_layer_block(block, next_block)
 
         total_time = time.time() - start_time
         logger.info(f"[Engine]: Inference completed in {total_time:.4f} seconds")
@@ -104,7 +105,7 @@ class InferenceEngine:
     # Block execution helpers
     # ------------------------------------------------------------------
 
-    async def _execute_single_layer_block(self, block: BlockConfig) -> None:
+    async def _execute_single_layer_block(self, block: BlockConfig, next_block: BlockConfig | None) -> None:
         layer = block.layers[0]
         qp = block.quant_params[0]
         self.current_layer_idx = block.start_idx
@@ -116,7 +117,7 @@ class InferenceEngine:
         )
 
         layer_start = time.perf_counter()
-        await self._run_layer(layer, qp)
+        await self._run_layer(layer, qp, block, next_block)
         layer_time = time.perf_counter() - layer_start
 
         self.stats.end_layer(layer_time * 1000)
@@ -125,7 +126,7 @@ class InferenceEngine:
             f"total={layer_time * 1000:.2f}ms"
         )
 
-    async def _execute_multi_layer_block(self, block: BlockConfig) -> None:
+    async def _execute_multi_layer_block(self, block: BlockConfig, next_block: BlockConfig | None) -> None:
         block_names = "+".join(l.name for l in block.layers)
         self.current_layer_idx = block.end_idx
 
@@ -136,7 +137,7 @@ class InferenceEngine:
         )
 
         block_start = time.perf_counter()
-        await self._run_block(block)
+        await self._run_block(block, next_block)
         block_time = time.perf_counter() - block_start
 
         self.stats.end_layer(block_time * 1000)
@@ -149,7 +150,8 @@ class InferenceEngine:
     # Layer / block runners
     # ------------------------------------------------------------------
     
-    async def _run_layer(self, layer: LayerConfig, quant_params: QuantParams) -> None:
+    async def _run_layer(self, layer: LayerConfig, quant_params: QuantParams,
+                         block: BlockConfig, next_block: BlockConfig | None) -> None:
         # Cache residual if requested
         if layer.residual_add_to:
             self.residual_buffers[layer.residual_add_to] = (
@@ -180,8 +182,12 @@ class InferenceEngine:
             halo_state = None
             if self.use_halo and self._prev_block_end_idx is not None:
                 halo_state = (self._prev_worker_rows, self._prev_block_end_idx)
+            return_halo_plan = None
+            if self.use_halo and next_block is not None:
+                return_halo_plan = self._compute_return_halo_plan(block, next_block)
             self.feature_map, new_worker_rows = await self.distributor.distribute_conv(
-                self.feature_map, layer, quant_params, self.current_layer_idx, halo_state
+                self.feature_map, layer, quant_params, self.current_layer_idx, 
+                halo_state, return_halo_plan
             )
 
         # Apply residual connection
@@ -198,7 +204,7 @@ class InferenceEngine:
             self._prev_block_end_idx = self.current_layer_idx
 
 
-    async def _run_block(self, block: BlockConfig) -> None:
+    async def _run_block(self, block: BlockConfig, next_block: BlockConfig | None) -> None:
         """Execute a multi-layer block in one round-trip.
 
         Residual handling stays on the coordinator side.
@@ -220,9 +226,13 @@ class InferenceEngine:
         halo_state = None
         if self.use_halo and self._prev_block_end_idx is not None:
             halo_state  = (self._prev_worker_rows, self._prev_block_end_idx)
+        return_halo_plan = None
+        if self.use_halo and next_block is not None:
+            return_halo_plan = self._compute_return_halo_plan(block, next_block)
         # Distribute block across workers
         self.feature_map, new_worker_rows = await self.distributor.distribute_block(
-            self.feature_map, block, self.current_layer_idx, halo_state
+            self.feature_map, block, self.current_layer_idx, 
+            halo_state, return_halo_plan
         )
 
         # Apply residual (add cached input to block output)
@@ -238,7 +248,109 @@ class InferenceEngine:
         else:
             self._prev_worker_rows = new_worker_rows
             self._prev_block_end_idx = block.end_idx
+    
+    def _compute_return_halo_plan(self, block: BlockConfig, next_block: BlockConfig) -> Optional[dict[int, int]]:
+        """ Decide whether current block's worker would return only boundary rows 
+        Enable iff 
+            1) next block will consume the output through forward halo
+            2) doesn't require full feature map on the coordinator side
+        """
+        # next block must not cache residual
+        if next_block.residual_cache_name:
+            return None
+        if next_block.residual_connect_name:
+            return None
+        for lyr in block.layers:
+            if lyr.residual_add_to or lyr.residual_connect_from:
+                return None
+        # next block must not be FC / GAP
+        if any(l.type == LayerType.FC for l in next_block.layers):
+            return None
+        # current block output must follows [C, H, W]
+        if self.feature_map is None or self.feature_map.ndim != 3:
+            return None
+        
+        H_curr_in = self.feature_map.shape[1]
 
+        def _spatial_params(blk: BlockConfig) -> tuple[int, int, int] | None:
+            if blk.start_idx == blk.end_idx:
+                lyr = blk.layers[0]
+                if lyr.type == LayerType.FC:
+                    return None
+                return lyr.kernel_size, lyr.stride, lyr.padding
+            dw = next((l for l in blk.layers if l.type == LayerType.DEPTHWISE), None)
+            if dw is None:
+                return None
+            return dw.kernel_size, dw.stride, dw.padding
+        
+        curr_p = _spatial_params(block)
+        next_p = _spatial_params(next_block)
+        if curr_p is None or next_p is None:
+            return None
+        
+        curr_k, curr_s, curr_pad = curr_p
+        next_k, next_s, next_pad = next_p
+        H_curr_out = (H_curr_in + 2 * curr_pad - curr_k) // curr_s + 1
+        H_next_out = (H_curr_out + 2 * next_pad - next_k) // next_s + 1
+
+        num_workers = len(self.distributor.worker_manager.workers)
+        if num_workers <= 1:
+            return None
+        
+        curr_rows_per_worker = -(-H_curr_out // num_workers)  # ceiling division
+        next_rows_per_worker = -(-H_next_out // num_workers)
+        
+        curr_rows: list[tuple[int, int] | None] = []
+        next_in_rows: list[tuple[int, int] | None] = []
+        for i in range(num_workers):
+            a = i * curr_rows_per_worker
+            b = min(a + curr_rows_per_worker, H_curr_out)
+            curr_rows.append((a, b) if a < H_curr_out else None)
+
+            na_out = i * next_rows_per_worker
+            nb_out = min(na_out + next_rows_per_worker, H_next_out)
+            if na_out >= H_next_out:
+                next_in_rows.append(None)
+                continue
+            in_start_raw = na_out * next_s - next_pad
+            in_end_raw = (nb_out - 1) * next_s + next_k - next_pad
+            in_start = max(in_start_raw, 0)
+            in_end = min(in_end_raw, H_curr_out)
+            next_in_rows.append((in_start, in_end))
+        
+        # every worker should participate in next block's forward halo
+        for i in range(num_workers):
+            if curr_rows[i] is None or next_in_rows[i] is None:
+                return None
+            ca, cb = curr_rows[i]
+            na, nb = next_in_rows[i]
+            if min(cb, nb) - max(ca, na) <= 0:
+                return None
+        
+        k_top = [0] * num_workers
+        k_bottom = [0] * num_workers
+        for i in range(num_workers):
+            ca, cb = curr_rows[i]
+            if i > 0:
+                prev_cb = curr_rows[i - 1][1]
+                prev_nb = next_in_rows[i - 1][1]
+                k_top[i] = max(0, min(prev_nb - prev_cb, cb - ca))
+            if i + 1 < num_workers:
+                next_ca = curr_rows[i + 1][0]
+                next_na = next_in_rows[i + 1][0]
+                k_bottom[i] = max(0, min(next_ca - next_na, cb - ca))
+
+        if all(k == 0 for k in k_top) and all(k == 0 for k in k_bottom):
+            return None
+        
+        logger.debug(
+            f"[Engine]: Computed return halo plan for block [{block.start_idx}-{block.end_idx}] -> "
+            f"next block [{next_block.start_idx}-{next_block.end_idx}]: "
+            f"curr_out_rows={curr_rows} next_in_rows={next_in_rows} "
+            f"k_top={k_top} k_bottom={k_bottom}"
+        )
+        return k_top, k_bottom
+            
     # ------------------------------------------------------------------
     # Residual connection
     # ------------------------------------------------------------------

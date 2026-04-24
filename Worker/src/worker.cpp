@@ -475,7 +475,7 @@ void Worker::HandleBlockComputing() {
     }
 
     // After the loop, src points to the last output (swapped after last layer write to dst)
-    // For odd number of layers: src = output_buffer_  (good, HandleSendingResult reads output_buffer_)
+    // For odd number of layers: src = output_buffer_  (HandleSendingResult reads output_buffer_)
     // For even number of layers: src = input_buffer_  (need to copy to output_buffer_)
     uint32_t num_layers = end_idx - start_idx + 1;
     uint32_t output_size = current_task_.out_channels * current_task_.out_h * current_task_.out_w;
@@ -502,7 +502,15 @@ void Worker::HandleBlockComputing() {
 
     current_result_.compute_time_us = total_compute_us;
     current_result_.compress_time_us = 0;
-    current_result_.output_size = output_size;
+    // return halo
+    if (current_task_.return_halo) {
+        // only boundary rows
+        uint32_t k_top = current_task_.return_halo_top_rows;
+        uint32_t k_bottom = current_task_.return_halo_bottom_rows;
+        current_result_.output_size = (k_top + k_bottom) * current_task_.out_channels * current_task_.out_w;
+    } else {
+        current_result_.output_size = output_size;
+    }
     state_ = WorkerState::SENDING_RESULT;
 }
 
@@ -516,18 +524,38 @@ void Worker::HandleSendingResult() {
     Send((const uint8_t *)&header, sizeof(header));
     Send((const uint8_t *)&current_result_, sizeof(current_result_));
 
-    // send big data in chunks
-    const size_t CHUNK_SIZE = 1024;  // 1KB per chunk, can be tuned based on performance testing
-    size_t total = current_result_.output_size;
-    size_t offset = 0;
-    
-    while (offset < total) {
-        size_t chunk = min(CHUNK_SIZE, total - offset);
-        // Send((const uint8_t *)&input_buffer_[offset], chunk);
-        Send((const uint8_t *)&output_buffer_[offset], chunk); // if not compress
-        offset += chunk;
-    }
+    if (current_task_.return_halo) {
+        // return halo, send [C, k_top, W] + [C, k_bottom, W]
+        const uint32_t C = current_task_.out_channels;
+        const uint32_t H = current_task_.out_h;
+        const uint32_t W = current_task_.out_w;
+        const uint32_t k_top = current_task_.return_halo_top_rows;
+        const uint32_t k_bottom = current_task_.return_halo_bottom_rows;
 
+        if (k_top > 0) {
+            for (uint32_t c = 0; c < C; ++c) {
+                Send((const uint8_t *)(output_buffer_ + (size_t)c * H * W), k_top * W);
+            }
+        }
+
+        if (k_bottom > 0) {
+            for (uint32_t c = 0; c < C; ++c) {
+                Send((const uint8_t *)(output_buffer_ + (size_t)c * H * W + (H - k_bottom) * W), k_bottom * W);
+            }
+        }
+    } else {
+        // send big data in chunks
+        const size_t CHUNK_SIZE = 1024;  // 1KB per chunk, can be tuned based on performance testing
+        size_t total = current_result_.output_size;
+        size_t offset = 0;
+        
+        while (offset < total) {
+            size_t chunk = min(CHUNK_SIZE, total - offset);
+            // Send((const uint8_t *)&input_buffer_[offset], chunk);
+            Send((const uint8_t *)&output_buffer_[offset], chunk); // if not compress
+            offset += chunk;
+        }
+    }
     // Send(output_buffer_, current_result_.output_size);
     client_.flush();
 #ifdef DEBUG
