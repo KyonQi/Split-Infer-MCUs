@@ -60,19 +60,22 @@ class InferenceStats:
             "send_bytes_full": send_bytes_full,
             "recv_bytes_actual": 0,
             "recv_bytes_full": 0,
+            "wait_header_ms": 0.0,
         }
         self._current["send_bytes_actual"] += send_bytes_actual
         self._current["send_bytes_full"] += send_bytes_full
         self.total_send_bytes_actual += send_bytes_actual
         self.total_send_bytes_full += send_bytes_full
 
-    def record_worker_result(self, worker_id: int, compute_ms: float, compress_ms: float, recv_time_ms: float,
+    def record_worker_result(self, worker_id: int, compute_ms: float, compress_ms: float, 
+                             wait_header_ms: float = 0.0, recv_time_ms: float = 0.0, 
                              recv_bytes_actual: int = 0, recv_bytes_full: int = 0) -> None:
         if worker_id in self._current["workers"]:
             ws = self._current["workers"][worker_id]
             ws["mcu_compute_ms"] = compute_ms
             ws["mcu_compress_ms"] = compress_ms
             ws["recv_time_ms"] = recv_time_ms
+            ws["wait_header_ms"] = wait_header_ms
             ws["recv_bytes_actual"] = recv_bytes_actual
             ws["recv_bytes_full"] = recv_bytes_full
         self._current["recv_bytes_actual"] += recv_bytes_actual
@@ -85,12 +88,18 @@ class InferenceStats:
         self._current["total_time_ms"] = total_time_ms
         worker_stats = list(self._current["workers"].values())
         if worker_stats:
-            self._current["avg_compute_ms"] = float(
-                np.mean([ws["mcu_compute_ms"] for ws in worker_stats])
-            )
+            compute_arr = np.array([ws["mcu_compute_ms"] for ws in worker_stats])
+            wait_arr = np.array([ws["wait_header_ms"] for ws in worker_stats])
+            self._current["avg_compute_ms"] = float(np.mean(compute_arr))
+            self._current["max_compute_ms"] = float(np.max(compute_arr))
             self._current["avg_compress_ms"] = float(
                 np.mean([ws["mcu_compress_ms"] for ws in worker_stats])
             )
+            self._current["avg_wait_header_ms"] = float(np.mean(wait_arr))
+            self._current["max_wait_header_ms"] = float(np.max(wait_arr))
+            net_overhead = np.maximum(0.0, wait_arr - compute_arr)
+            self._current["avg_net_overhead_ms"] = float(np.mean(net_overhead))
+            self._current["max_net_overhead_ms"] = float(np.max(net_overhead))
         self.records.append(self._current)
         self._current = {}
 
@@ -121,7 +130,9 @@ class InferenceStats:
             logger.info(
                 f"Layer {idx_str:>5} [{s['layer_type']:>8}] {s['layer_name']}: "
                 f"total={s['total_time_ms']:7.2f}ms  "
-                f"compute={s.get('avg_compute_ms', 0):6.2f}ms  "
+                f"cmpt(avg/max)={s.get('avg_compute_ms', 0):6.2f}/{s.get('max_compute_ms', 0):6.2f}ms  "
+                f"wait(avg/max)={s.get('avg_wait_header_ms', 0):6.2f}/{s.get('max_wait_header_ms', 0):6.2f}ms  "
+                f"net_oh(avg/max)={s.get('avg_net_overhead_ms', 0):5.2f}/{s.get('max_net_overhead_ms', 0):5.2f}ms  "
                 f"compress={s.get('avg_compress_ms', 0):5.2f}ms  "
                 f"send={self._fmt_bytes(sa):>9}/{self._fmt_bytes(sf):>9} (save {self._saving_pct(sa, sf)})  "
                 f"recv={self._fmt_bytes(ra):>9}/{self._fmt_bytes(rf):>9} (save {self._saving_pct(ra, rf)})"

@@ -453,7 +453,9 @@ class TaskDistributor:
                                      k_top: int, k_bottom: int,
                                      output: np.ndarray, current_layer_idx: int) -> None:
         try:
+            wait_start = time.perf_counter()
             header, payload = await self.worker_manager.receive_message(worker, timeout=60)
+            wait_for_header_ms = (time.perf_counter() - wait_start) * 1000
 
             if not (header and payload):
                 raise RuntimeError(f"Failed to receive result from worker {worker.worker_id}")
@@ -481,6 +483,8 @@ class TaskDistributor:
             logger.debug(
                 f"[Distributor]: Received result header from worker {worker.worker_id} "
                 f"with output size {result_msg.output_size} bytes"
+                f"(wait_header={wait_for_header_ms:.2f}ms)"
+                f"(recv_time={recv_time*1000:.2f}ms)"
             )
 
             # Parse output data and write to correct position
@@ -527,6 +531,7 @@ class TaskDistributor:
                 worker.worker_id,
                 compute_ms=result_msg.compute_time_us / 1000,
                 compress_ms=result_msg.compress_time_us / 1000,
+                wait_header_ms=wait_for_header_ms,
                 recv_time_ms=recv_time * 1000,
                 recv_bytes_actual=recv_bytes_actual,
                 recv_bytes_full=full_slice_bytes,
@@ -539,6 +544,8 @@ class TaskDistributor:
                 f"slice [{start_idx}, {end_idx}), "
                 f"compute time: {result_msg.compute_time_us / 1000:.2f} ms, "
                 f"compress time: {result_msg.compress_time_us / 1000:.2f} ms"
+                f"wait_header={wait_for_header_ms:.2f}ms  "
+                f"recv_body={recv_time * 1000:.2f}ms"
             )
 
         except Exception as e:
