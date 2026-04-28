@@ -89,9 +89,12 @@ class InferenceStats:
         worker_stats = list(self._current["workers"].values())
         if worker_stats:
             compute_arr = np.array([ws["mcu_compute_ms"] for ws in worker_stats])
+            send_arr = np.array([ws["send_time_ms"] for ws in worker_stats])
             wait_arr = np.array([ws["wait_header_ms"] for ws in worker_stats])
             self._current["avg_compute_ms"] = float(np.mean(compute_arr))
             self._current["max_compute_ms"] = float(np.max(compute_arr))
+            self._current["avg_send_ms"] = float(np.mean(send_arr))
+            self._current["max_send_ms"] = float(np.max(send_arr))
             self._current["avg_compress_ms"] = float(
                 np.mean([ws["mcu_compress_ms"] for ws in worker_stats])
             )
@@ -130,6 +133,7 @@ class InferenceStats:
             logger.info(
                 f"Layer {idx_str:>5} [{s['layer_type']:>8}] {s['layer_name']}: "
                 f"total={s['total_time_ms']:7.2f}ms  "
+                f"send(avg/max)={s.get('avg_send_ms', 0):6.2f}/{s.get('max_send_ms', 0):6.2f}ms  "
                 f"cmpt(avg/max)={s.get('avg_compute_ms', 0):6.2f}/{s.get('max_compute_ms', 0):6.2f}ms  "
                 f"wait(avg/max)={s.get('avg_wait_header_ms', 0):6.2f}/{s.get('max_wait_header_ms', 0):6.2f}ms  "
                 f"net_oh(avg/max)={s.get('avg_net_overhead_ms', 0):5.2f}/{s.get('max_net_overhead_ms', 0):5.2f}ms  "
