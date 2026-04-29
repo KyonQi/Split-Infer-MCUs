@@ -44,7 +44,7 @@ class InferenceEngine:
         self.quant_params_list: list[QuantParams] = []
         
         # Halo reuse
-        self.use_halo = True
+        self.use_halo = False
         self._prev_worker_rows: list[tuple[int, int]] | None = None
         self._prev_block_end_idx: int | None = None
 
@@ -152,6 +152,7 @@ class InferenceEngine:
     
     async def _run_layer(self, layer: LayerConfig, quant_params: QuantParams,
                          block: BlockConfig, next_block: BlockConfig | None) -> None:
+        pre_start = time.perf_counter()
         # Cache residual if requested
         if layer.residual_add_to:
             self.residual_buffers[layer.residual_add_to] = (
@@ -171,6 +172,16 @@ class InferenceEngine:
             logger.debug(f"[Engine]: Applied GAP for FC layer, new shape {self.feature_map.shape}")
             with np.printoptions(threshold=sys.maxsize, linewidth=150):
                 logger.debug(f"[Engine]: Sample GAP output values:\n{self.feature_map}\n")
+        
+        halo_state = None
+        return_halo_plan = None
+        if layer.type != LayerType.FC:
+            if self.use_halo and self._prev_block_end_idx is not None:
+                halo_state = (self._prev_worker_rows, self._prev_block_end_idx)
+            if self.use_halo and next_block is not None:
+                return_halo_plan = self._compute_return_halo_plan(block, next_block)
+        
+        self.stats.record_phase("engine_pre_ms", (time.perf_counter() - pre_start) * 1000)
 
         # Distribute
         if layer.type == LayerType.FC:
@@ -179,17 +190,12 @@ class InferenceEngine:
             )
             new_worker_rows = None  # FC has no spatial halo
         else:
-            halo_state = None
-            if self.use_halo and self._prev_block_end_idx is not None:
-                halo_state = (self._prev_worker_rows, self._prev_block_end_idx)
-            return_halo_plan = None
-            if self.use_halo and next_block is not None:
-                return_halo_plan = self._compute_return_halo_plan(block, next_block)
             self.feature_map, new_worker_rows = await self.distributor.distribute_conv(
                 self.feature_map, layer, quant_params, self.current_layer_idx, 
                 halo_state, return_halo_plan
             )
 
+        post_start = time.perf_counter()
         # Apply residual connection
         if layer.residual_connect_from:
             self._apply_residual(layer.residual_connect_from)
@@ -202,6 +208,7 @@ class InferenceEngine:
         else:
             self._prev_worker_rows = new_worker_rows
             self._prev_block_end_idx = self.current_layer_idx
+        self.stats.record_phase("engine_post_ms", (time.perf_counter() - post_start) * 1000)
 
 
     async def _run_block(self, block: BlockConfig, next_block: BlockConfig | None) -> None:
@@ -209,6 +216,7 @@ class InferenceEngine:
 
         Residual handling stays on the coordinator side.
         """
+        pre_start = time.perf_counter()
         # Save residual (block input before expand)
         if block.residual_cache_name:
             first_qp = block.quant_params[0]
@@ -229,12 +237,14 @@ class InferenceEngine:
         return_halo_plan = None
         if self.use_halo and next_block is not None:
             return_halo_plan = self._compute_return_halo_plan(block, next_block)
+        self.stats.record_phase("engine_pre_ms", (time.perf_counter() - pre_start) * 1000)
         # Distribute block across workers
         self.feature_map, new_worker_rows = await self.distributor.distribute_block(
             self.feature_map, block, self.current_layer_idx, 
             halo_state, return_halo_plan
         )
 
+        post_start = time.perf_counter()
         # Apply residual (add cached input to block output)
         if block.residual_connect_name:
             self.current_layer_idx = block.end_idx
@@ -248,6 +258,7 @@ class InferenceEngine:
         else:
             self._prev_worker_rows = new_worker_rows
             self._prev_block_end_idx = block.end_idx
+        self.stats.record_phase("engine_post_ms", (time.perf_counter() - post_start) * 1000)
     
     def _compute_return_halo_plan(self, block: BlockConfig, next_block: BlockConfig) -> Optional[dict[int, int]]:
         """ Decide whether current block's worker would return only boundary rows 

@@ -41,6 +41,7 @@ class InferenceStats:
             "send_bytes_full": 0,
             "recv_bytes_actual": 0,
             "recv_bytes_full": 0,
+            "phase_ms": {}, # e.g. "send", "compute", "recv"
             "workers": {},
         }
 
@@ -82,6 +83,9 @@ class InferenceStats:
         self._current["recv_bytes_full"] += recv_bytes_full
         self.total_recv_bytes_actual += recv_bytes_actual
         self.total_recv_bytes_full += recv_bytes_full
+
+    def record_phase(self, name: str, duration_ms: float) -> None:
+        self._current.setdefault("phase_ms", {})[name] = duration_ms
 
     def end_layer(self, total_time_ms: float) -> None:
         """Finalise the current layer record and append to history."""
@@ -141,6 +145,17 @@ class InferenceStats:
                 f"send={self._fmt_bytes(sa):>9}/{self._fmt_bytes(sf):>9} (save {self._saving_pct(sa, sf)})  "
                 f"recv={self._fmt_bytes(ra):>9}/{self._fmt_bytes(rf):>9} (save {self._saving_pct(ra, rf)})"
             )
+            ph = s.get("phase_ms", {})
+            if ph:
+                accounted = sum(ph.values())
+                logger.info(
+                    f"engine_pre={ph.get('engine_pre_ms', 0):5.2f}  "
+                    f"build={ph.get('build_ms', 0):5.2f}  "
+                    f"send_phase={ph.get('send_phase_ms', 0):6.2f}  "
+                    f"recv_phase={ph.get('recv_phase_ms', 0):6.2f}  "
+                    f"engine_post={ph.get('engine_post_ms', 0):5.2f}  "
+                    f"(Σ={accounted:6.2f}/{s['total_time_ms']:6.2f}ms)"
+                )
 
         logger.info(
             f"Total send: actual={self._fmt_bytes(self.total_send_bytes_actual)}  "
